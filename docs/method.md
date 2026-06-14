@@ -1,6 +1,6 @@
 # The TIMBERS method
 
-TIMBERS (Time-Integrated Marine Bézier Energy Routing System) extends the BERS
+TIMBERS (Time-Integrated Marine Bézier Evolve and Refine Strategy) extends the BERS
 reference method (arXiv 2605.31533) for deterministic ship weather routing on
 gridded weather. BERS is reproduced as the baseline and then extended. This
 document summarizes what changed, why, and — equally important — what was tried

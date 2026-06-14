@@ -1,4 +1,4 @@
-"""TIMBERS: Time-Integrated Marine Bézier Energy Routing System.
+"""TIMBERS: Time-Integrated Marine Bézier Evolve and Refine Strategy.
 
 GPU/JAX weather routing that co-optimizes route geometry (Bézier control
 points) and an explicit time-allocation (speed) profile with separable
