@@ -146,6 +146,41 @@ def test_explicit_speed_beats_uniform_under_storm():
     assert e_timbers < e_bers                          # and strictly better here
 
 
+def test_risk_scorer_and_robust_cost():
+    """risk.make_scorer scores a fixed route across an ensemble; risk.make_robust_cost
+    is a finite batched cost. The nominal member (index 0) must match the deterministic
+    scorer on the same route."""
+    from timbers import risk as rk
+
+    grids, wind, wave = _storm_grid()
+    land = _land()
+    perts = rk.perturbation_grid(dlat=(0.0, 0.4), dt=(0.0, 3.0), hs=(1.0, 1.2))  # 8, row0 nominal
+    assert tuple(perts[0]) == (0.0, 0.0, 0.0, 1.0, 1.0)
+
+    theta = op.gc_init_theta(COR, K, 4)
+    lat, wlon, seg = op.decode_route(theta, COR, K, L, 4)
+    signed = op.working_to_signed(wlon)
+
+    scorer = rk.make_scorer(grids, COR, False, toy_power_jax, align=ALIGN)
+    E, Hs, TWS = scorer(jnp.asarray(lat, jnp.float32), jnp.asarray(signed, jnp.float32),
+                        jnp.asarray(seg, jnp.float32), 0.0, perts)
+    E, Hs, TWS = np.asarray(E), np.asarray(Hs), np.asarray(TWS)
+    assert E.shape == Hs.shape == TWS.shape == (len(perts),)
+    assert np.isfinite(E).all() and (E > 0).all()
+    # nominal-member energy matches the plain host scorer on the same route
+    e_nom = evaluate_route_full(
+        wind, wave,
+        [(T0.item() + timedelta(hours=float(a)), float(la), float(lo))
+         for a, la, lo in zip(np.concatenate([[0.0], np.cumsum(seg)]), lat, signed)],
+        toy_power_np, wps=False)["energy_mwh"]
+    assert abs(E[0] - e_nom) / e_nom < 0.02            # same physics, ±resample/precision
+
+    cost = rk.make_robust_cost(grids, land, COR, L, False, K, 4, ALIGN, perts,
+                               toy_power_jax, hs_lim=7.0, us_lim=20.0)
+    J = np.asarray(cost(jnp.asarray(theta, jnp.float32)[None, :], 0.0))
+    assert J.shape == (1,) and np.isfinite(J).all()
+
+
 def test_solve_corridor_backend():
     grids, wind, wave = _device_grids()
     land = _land()

@@ -100,6 +100,10 @@ route held fixed:
   (trading a lower violation probability for some energy).
 
 This reframes deterministic-routing spread as **method vs risk-appetite**.
+`examples/run_risk.py` makes this concrete on the toy storm: a deterministic
+route minimal in nominal energy is infeasible (Hs over limit) in a sizeable
+fraction of the forecast-error ensemble, while the chance-constrained route
+drives that fraction to zero for a modest nominal-energy premium.
 
 ## 5. TiMBERS vs BERS, head to head
 

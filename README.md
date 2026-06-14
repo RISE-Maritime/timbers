@@ -66,6 +66,12 @@ same code path gives both. It prints a 2×2 ablation (uniform vs explicit speed 
 Stage 1 only vs + polish) on a storm scenario; see
 [docs/method.md](docs/method.md) § *TiMBERS vs BERS*.
 
+`examples/run_risk.py` demonstrates the risk-aware extension (`timbers.risk`):
+it optimizes a deterministic and a robust (chance-constrained) route for the
+same storm departure, then scores both across a forecast-error surrogate
+ensemble — showing the robust route trade a little nominal energy for a much
+lower chance of exceeding the wave limit.
+
 Tests: `pytest`. The suite is data-free — unit invariants plus an end-to-end run
 of the optimizer, the JAX evaluator, the host scorer, and the `solve_corridor`
 backend, all on synthetic grids with the toy power model.
