@@ -100,10 +100,22 @@ route held fixed:
   (trading a lower violation probability for some energy).
 
 This reframes deterministic-routing spread as **method vs risk-appetite**.
-`examples/run_risk.py` makes this concrete on the toy storm: a deterministic
-route minimal in nominal energy is infeasible (Hs over limit) in a sizeable
-fraction of the forecast-error ensemble, while the chance-constrained route
-drives that fraction to zero for a modest nominal-energy premium.
+`examples/run_risk.py` makes it concrete: it optimizes a deterministic and a
+chance-constrained route for the same toy storm departure, then scores both
+across an 18-member forecast-error surrogate ensemble (spatial ±0.3°, temporal
+±3 h, Hs ×1.12) and reports the fraction whose max Hs crosses the 7 m limit:
+
+```
+route              nom MWh    nom maxHs   Hs>limit (ensemble)
+deterministic       7869.7        4.29 m              17%
+robust              9170.0        2.96 m               0%
+```
+
+The deterministic route is cheapest yet infeasible in ~1 in 6 perturbed
+forecasts; the chance-constrained route eliminates that for a ~16% nominal-energy
+premium — the safety buffer emerging from the local forecast spread rather than a
+hand-tuned margin. Same caveat as §5: toy power model on a constructed scenario,
+so the magnitudes are illustrative of the mechanism, not real-vessel numbers.
 
 ## 5. TiMBERS vs BERS, head to head
 
