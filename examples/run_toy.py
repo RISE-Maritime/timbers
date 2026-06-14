@@ -26,7 +26,14 @@ K, L, NSP, ALIGN = 6, 40, 4, 0.25
 T0 = np.datetime64("2024-01-01T00:00:00", "s")
 
 
-def synthetic_grids():
+def synthetic_grids(storm=False):
+    """Synthetic wind/wave grids on a small signed-lon domain.
+
+    With ``storm=True`` a wind/wave blob is added, localized in both longitude
+    and time around the point a uniform-speed ship would cross it -- so *when*
+    the route crosses matters and explicit speed allocation has something to
+    exploit (see ``compare_bers.py``).
+    """
     lat = np.arange(35.0, 50.001, 0.5)
     lon = np.arange(-75.0, 5.001, 0.5)          # signed lon -> no antimeridian wrap
     nt = 73
@@ -38,6 +45,13 @@ def synthetic_grids():
     v10 = (-4.0 + 2.0 * np.cos(0.08 * tt)).astype(np.float32) * ones
     swh = (1.5 + 0.6 * np.sin(0.07 * tt)).astype(np.float32) * ones
     mwd = np.mod(200.0 + 20.0 * np.cos(0.05 * tt), 360.0).astype(np.float32) * ones
+    if storm:
+        lon3 = lon[None, None, :]
+        blob = (np.exp(-((tt - 24.0) / 4.0) ** 2)
+                * np.exp(-((lon3 - (-37.0)) / 6.0) ** 2))     # peak at t=24 h, lon=-37
+        u10 = u10 + (28.0 * blob).astype(np.float32)
+        v10 = v10 + (18.0 * blob).astype(np.float32)
+        swh = swh + (5.0 * blob).astype(np.float32)
     base = dict(lat=lat, lon=lon, times=times, t0=times[0], dt_h=1.0)
     return {**base, "u10": u10, "v10": v10}, {**base, "swh": swh, "mwd": mwd}
 

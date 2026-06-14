@@ -60,6 +60,12 @@ PYTHONPATH=examples python examples/run_toy.py
 small synthetic corridor and weather grid and runs the full pipeline (device
 sep-CMA cost → host scorer + polish) with no external data.
 
+`examples/compare_bers.py` isolates the explicit-speed lever — TIMBERS contains
+BERS as the `n_speed = 0` (uniform-speed, geometry-only) special case, so the
+same code path gives both. It prints a 2×2 ablation (uniform vs explicit speed ×
+Stage 1 only vs + polish) on a storm scenario; see
+[docs/method.md](docs/method.md) § *TIMBERS vs BERS*.
+
 Tests: `pytest`. The suite is data-free — unit invariants plus an end-to-end run
 of the optimizer, the JAX evaluator, the host scorer, and the `solve_corridor`
 backend, all on synthetic grids with the toy power model.

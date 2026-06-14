@@ -113,6 +113,39 @@ def test_host_scorer_path():
     assert full["energy_mwh"] > 0.0
 
 
+def _storm_grid():
+    """Synthetic grids with a localized space-time storm (so speed allocation bites)."""
+    wind, wave = _grid()
+    lon = wind["lon"]
+    tt = np.arange(wind["u10"].shape[0])[:, None, None]
+    blob = (np.exp(-((tt - 24.0) / 4.0) ** 2)
+            * np.exp(-((lon[None, None, :] - (-37.0)) / 6.0) ** 2))
+    wind = {**wind, "u10": wind["u10"] + (28.0 * blob).astype(np.float32),
+            "v10": wind["v10"] + (18.0 * blob).astype(np.float32)}
+    wave = {**wave, "swh": wave["swh"] + (5.0 * blob).astype(np.float32)}
+    return jm.DeviceGrids(wind, wave), wind, wave
+
+
+def _solve(grids, wind, wave, land, n_speed):
+    return oj.solve_corridor(
+        COR, grids, land, op.Penalty(), [datetime(2024, 1, 1)], wind, wave,
+        wps=False, K=K, L=L, NSP=n_speed, ALIGN=ALIGN,
+        n_seeds=2, popsize=48, maxiter=100, base_seed=0,
+        power_fn=toy_power_jax, power_fn_host=toy_power_np, polish=False,
+    )[0]["energy_mwh"]
+
+
+def test_explicit_speed_beats_uniform_under_storm():
+    """TIMBERS (n_speed>0) >= BERS (n_speed=0) since it is a strict superset:
+    on a storm the explicit-speed profile must not cost more energy."""
+    grids, wind, wave = _storm_grid()
+    land = _land()
+    e_bers = _solve(grids, wind, wave, land, 0)        # uniform speed = BERS
+    e_timbers = _solve(grids, wind, wave, land, 6)     # + explicit speed
+    assert e_timbers <= e_bers * (1.0 + 1e-3)          # never meaningfully worse
+    assert e_timbers < e_bers                          # and strictly better here
+
+
 def test_solve_corridor_backend():
     grids, wind, wave = _device_grids()
     land = _land()
