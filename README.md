@@ -1,12 +1,12 @@
-# TIMBERS
+# TiMBERS
 
 **Time-Modulated Bézier Evolve and Refine Strategy** — GPU weather routing
 that co-optimizes route geometry and an explicit speed profile.
 
-TIMBERS extends the BERS reference method (arXiv 2605.31533) for deterministic
+TiMBERS extends the BERS reference method (arXiv 2605.31533) for deterministic
 ship weather routing on gridded weather (e.g. ERA5 reanalysis). A route is a
 degree-(K−1) Bézier curve with endpoints fixed at the ports; where BERS searches
-geometry only (speed implicit, uniform time per curve parameter), TIMBERS
+geometry only (speed implicit, uniform time per curve parameter), TiMBERS
 searches geometry **jointly with a time-allocation profile** — `n_speed`
 log-weights, interpolated to the track segments and exp-normalized into
 per-segment durations that sum to the fixed passage time. Speed allocation turns
@@ -60,11 +60,11 @@ PYTHONPATH=examples python examples/run_toy.py
 small synthetic corridor and weather grid and runs the full pipeline (device
 sep-CMA cost → host scorer + polish) with no external data.
 
-`examples/compare_bers.py` isolates the explicit-speed lever — TIMBERS contains
+`examples/compare_bers.py` isolates the explicit-speed lever — TiMBERS contains
 BERS as the `n_speed = 0` (uniform-speed, geometry-only) special case, so the
 same code path gives both. It prints a 2×2 ablation (uniform vs explicit speed ×
 Stage 1 only vs + polish) on a storm scenario; see
-[docs/method.md](docs/method.md) § *TIMBERS vs BERS*.
+[docs/method.md](docs/method.md) § *TiMBERS vs BERS*.
 
 Tests: `pytest`. The suite is data-free — unit invariants plus an end-to-end run
 of the optimizer, the JAX evaluator, the host scorer, and the `solve_corridor`
@@ -84,18 +84,18 @@ backend, all on synthetic grids with the toy power model.
 
 ## Attribution
 
-- **BERS** — the reference method TIMBERS extends. Daniel Precioso, Francisco
+- **BERS** — the reference method TiMBERS extends. Daniel Precioso, Francisco
   Suárez, Javier Jiménez de la Jara, Rafael Ballester-Ripoll, David Gómez-Ullate,
   *BERS: Locally Optimal Continuous Algorithm for Maritime Weather Routing with
   Just-in-Time Arrival* (Bézier Evolve and Refine Strategy), arXiv:2605.31533
-  (IE University; Universidad de Cádiz). TIMBERS reproduces the BERS baseline
+  (IE University; Universidad de Cádiz). TiMBERS reproduces the BERS baseline
   before extending it.
 - **sep-CMA-ES** — Ros & Hansen (2008), *A Simple Modification in CMA-ES
   Achieving Linear Time and Space Complexity*.
 
 ## Data sources
 
-TIMBERS bundles no data. If you use the loaders/scripts:
+TiMBERS bundles no data. If you use the loaders/scripts:
 
 - **ERA5** reanalysis — Copernicus Climate Change Service (C3S) / ECMWF;
   downloaded by the user under the C3S licence (used by `timbers.era5`).

@@ -1,13 +1,13 @@
-"""TIMBERS vs BERS: isolate the explicit-speed lever on the toy problem.
+"""TiMBERS vs BERS: isolate the explicit-speed lever on the toy problem.
 
-TIMBERS is a strict superset of the BERS reference method: ``n_speed = 0`` makes
+TiMBERS is a strict superset of the BERS reference method: ``n_speed = 0`` makes
 the time-allocation profile uniform, recovering BERS's implicit uniform-speed,
 geometry-only model. So a single code path gives both methods -- the only knob
 that changes is whether speed is a decision variable.
 
 This runs a 2x2 ablation (uniform vs explicit speed) x (Stage 1 only vs + polish)
 on the synthetic corridor + toy power model from ``run_toy.py`` and prints the
-energy ladder. The TIMBERS contribution is the uniform -> explicit-speed delta,
+energy ladder. The TiMBERS contribution is the uniform -> explicit-speed delta,
 with geometry, optimizer, seeds and polish held identical.
 
 NOTE: this is the toy power model, so the *magnitudes* are illustrative of the
@@ -26,7 +26,7 @@ from timbers import optimizer as op
 from timbers import solve as oj
 from toy_power import toy_power_jax, toy_power_np
 
-NSP_TIMBERS = 6                 # speed-profile log-weights for TIMBERS mode
+NSP_TIMBERS = 6                 # speed-profile log-weights for TiMBERS mode
 N_SEEDS, POPSIZE, MAXITER = 4, 64, 150
 
 
@@ -49,7 +49,7 @@ def run(n_speed: int, polish: bool) -> float:
 def main():
     grid = {(nsp, pol): run(nsp, pol)
             for nsp in (0, NSP_TIMBERS) for pol in (False, True)}
-    print(f"{'':22}{'uniform speed (BERS)':>22}{'explicit speed (TIMBERS)':>26}")
+    print(f"{'':22}{'uniform speed (BERS)':>22}{'explicit speed (TiMBERS)':>26}")
     for pol, label in ((False, "Stage 1 only"), (True, "+ gradient polish")):
         b, t = grid[(0, pol)], grid[(NSP_TIMBERS, pol)]
         red = 100.0 * (b - t) / b

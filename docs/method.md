@@ -1,6 +1,6 @@
-# The TIMBERS method
+# The TiMBERS method
 
-TIMBERS (Time-Modulated Bézier Evolve and Refine Strategy) extends the BERS
+TiMBERS (Time-Modulated Bézier Evolve and Refine Strategy) extends the BERS
 reference method (arXiv 2605.31533) for deterministic ship weather routing on
 gridded weather. BERS is reproduced as the baseline and then extended. This
 document summarizes what changed, why, and — equally important — what was tried
@@ -101,10 +101,10 @@ route held fixed:
 
 This reframes deterministic-routing spread as **method vs risk-appetite**.
 
-## 5. TIMBERS vs BERS, head to head
+## 5. TiMBERS vs BERS, head to head
 
 Because the time-allocation profile reduces to uniform speed at `n_speed = 0`,
-TIMBERS *contains* BERS: the same code path, with speed switched off, is BERS's
+TiMBERS *contains* BERS: the same code path, with speed switched off, is BERS's
 implicit uniform-speed, geometry-only model (and with `n_speed = 0` the gradient
 polish refines only the lateral geometry — a stand-in for BERS's FMS). So the
 explicit-speed contribution can be isolated by toggling a single knob, with
@@ -115,12 +115,12 @@ Stage 1 only vs + polish) on a synthetic corridor with a localized space-time
 storm and the toy power model:
 
 ```
-                        uniform speed (BERS)  explicit speed (TIMBERS)
+                        uniform speed (BERS)  explicit speed (TiMBERS)
 Stage 1 only                        7977.772                  7867.575   (+1.4% from speed)
 + gradient polish                   7975.673                  7861.022   (+1.4% from speed)
 ```
 
-The uniform→explicit-speed column delta is the TIMBERS lever. Two honest
+The uniform→explicit-speed column delta is the TiMBERS lever. Two honest
 caveats: (1) this is the **toy** power model on a constructed scenario, so the
 *magnitude* is illustrative of the mechanism, not a real-vessel or benchmark
 result; on benign weather the lever is near-zero — it only pays off when there

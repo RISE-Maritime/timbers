@@ -136,7 +136,7 @@ def _solve(grids, wind, wave, land, n_speed):
 
 
 def test_explicit_speed_beats_uniform_under_storm():
-    """TIMBERS (n_speed>0) >= BERS (n_speed=0) since it is a strict superset:
+    """TiMBERS (n_speed>0) >= BERS (n_speed=0) since it is a strict superset:
     on a storm the explicit-speed profile must not cost more energy."""
     grids, wind, wave = _storm_grid()
     land = _land()

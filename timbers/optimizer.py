@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""TIMBERS route parameterization and penalized cost (GPU/JAX).
+"""TiMBERS route parameterization and penalized cost (GPU/JAX).
 
 A route is a degree-(K-1) Bezier curve with fixed endpoints at the ports;
 CMA-ES searches the interior control points (in a normalized frame so sigma0

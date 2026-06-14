@@ -1,6 +1,6 @@
 """A toy ship power model for examples and tests.
 
-TIMBERS ships no vessel power model; you inject your own ``power_fn`` with the
+TiMBERS ships no vessel power model; you inject your own ``power_fn`` with the
 signature ``power_fn(tws, twa_deg, swh, mwa_deg, v, wps) -> kW``. This module is
 a deliberately trivial stand-in (made-up round coefficients, not calibrated to
 any real ship) so the pipeline can be run and tested end to end.

@@ -1,6 +1,6 @@
 """Minimal runnable demo: optimize one route on synthetic weather + a toy power model.
 
-TIMBERS ships no vessel power model or case definitions; you provide your own.
+TiMBERS ships no vessel power model or case definitions; you provide your own.
 This script wires up a tiny synthetic corridor and the toy power model in
 ``toy_power.py`` so the full pipeline (device sep-CMA cost -> host scorer) can be
 run with no external data.

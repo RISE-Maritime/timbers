@@ -1,4 +1,4 @@
-"""TIMBERS: Time-Modulated Bézier Evolve and Refine Strategy.
+"""TiMBERS: Time-Modulated Bézier Evolve and Refine Strategy.
 
 GPU/JAX weather routing that co-optimizes route geometry (Bézier control
 points) and an explicit time-allocation (speed) profile with separable
