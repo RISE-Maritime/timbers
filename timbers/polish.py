@@ -61,7 +61,12 @@ def make_polisher(grids, land, cor, pen, wps, K, L, NSP, ALIGN, power_fn, power_
         return lat, wlon, seg_dt
 
     def polish(lat, wlon, seg_dt, theta, dep_off, dep, wind, wave):
-        """Refine one route; returns a build-compatible result dict (>= the input route)."""
+        """Refine one route; returns a build-compatible result dict (>= the input route).
+
+        NB: the returned ``theta`` is the *pre-polish* Stage-1 vector (polish works in
+        offset space, so no theta reproduces the refined geometry). Use the returned
+        ``lat``/``wlon``/``seg_dt`` for the polished route; do not re-``decode_route`` theta.
+        """
         P0, normals, speed0 = route_inputs(lat, wlon, theta)
         p = jnp.concatenate([jnp.zeros(L, jnp.float32), speed0])
 

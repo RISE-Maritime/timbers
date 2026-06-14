@@ -3,7 +3,7 @@
 **Time-Modulated Bézier Evolve and Refine Strategy** — GPU weather routing
 that co-optimizes route geometry and an explicit speed profile.
 
-TiMBERS extends the BERS reference method (arXiv 2605.31533) for deterministic
+TiMBERS extends the BERS reference method (arXiv:2605.31533) for deterministic
 ship weather routing on gridded weather (e.g. ERA5 reanalysis). A route is a
 degree-(K−1) Bézier curve with endpoints fixed at the ports; where BERS searches
 geometry only (speed implicit, uniform time per curve parameter), TiMBERS

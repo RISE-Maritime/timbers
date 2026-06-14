@@ -117,8 +117,12 @@ storm and the toy power model:
 ```
                         uniform speed (BERS)  explicit speed (TiMBERS)
 Stage 1 only                        7977.772                  7867.575   (+1.4% from speed)
-+ gradient polish                   7975.673                  7861.022   (+1.4% from speed)
++ gradient polish                  ~7975.7                   ~7862      (+1.4% from speed)
 ```
+
+(Representative run. The Stage-1 figures are deterministic; the + polish row
+varies by ~0.02% run to run — the gradient stage is scored on the host and
+inherits XLA nondeterminism — so treat its digits as approximate.)
 
 The uniform→explicit-speed column delta is the TiMBERS lever. Two honest
 caveats: (1) this is the **toy** power model on a constructed scenario, so the

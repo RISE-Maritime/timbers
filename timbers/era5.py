@@ -17,8 +17,9 @@ Latitude may be stored ascending or descending; longitude is assumed to be in
 [0, 360). Interpolation is trilinear (lat, lon, time) on the regular grid,
 matching the reference scoring logic.
 
-Corridor grids are produced by ``scripts/download_era5.py``; they are cropped
-to a corridor bounding box so a full year fits comfortably in memory.
+Download ERA5 yourself from the Copernicus CDS (e.g. with the ``cdsapi``
+package) and point ``load_era5`` at the resulting NetCDF files. Cropping each
+field to a corridor bounding box keeps a full year comfortably in memory.
 """
 
 from __future__ import annotations
