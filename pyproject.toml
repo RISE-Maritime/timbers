@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "timbers"
 version = "0.1.0"
-description = "TIMBERS: Time-Integrated Marine Bézier Evolve and Refine Strategy — GPU weather routing with joint geometry + speed optimization"
+description = "TIMBERS: Time-Modulated Bézier Evolve and Refine Strategy — GPU weather routing with joint geometry + speed optimization"
 readme = "README.md"
 license = { file = "LICENSE" }
 authors = [{ name = "freol35241" }]

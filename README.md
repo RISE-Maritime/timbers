@@ -1,6 +1,6 @@
 # TIMBERS
 
-**Time-Integrated Marine Bézier Evolve and Refine Strategy** — GPU weather routing
+**Time-Modulated Bézier Evolve and Refine Strategy** — GPU weather routing
 that co-optimizes route geometry and an explicit speed profile.
 
 TIMBERS extends the BERS reference method (arXiv 2605.31533) for deterministic
