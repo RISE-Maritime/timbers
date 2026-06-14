@@ -78,10 +78,23 @@ backend, all on synthetic grids with the toy power model.
 
 ## Attribution
 
-- BERS reference method: arXiv 2605.31533 (IE University). TIMBERS reproduces
-  the BERS baseline before extending it.
-- sep-CMA-ES: Ros & Hansen (2008), *A Simple Modification in CMA-ES Achieving
-  Linear Time and Space Complexity*.
+- **BERS** — the reference method TIMBERS extends. Daniel Precioso, Francisco
+  Suárez, Javier Jiménez de la Jara, Rafael Ballester-Ripoll, David Gómez-Ullate,
+  *BERS: Locally Optimal Continuous Algorithm for Maritime Weather Routing with
+  Just-in-Time Arrival* (Bézier Evolve and Refine Strategy), arXiv:2605.31533
+  (IE University; Universidad de Cádiz). TIMBERS reproduces the BERS baseline
+  before extending it.
+- **sep-CMA-ES** — Ros & Hansen (2008), *A Simple Modification in CMA-ES
+  Achieving Linear Time and Space Complexity*.
+
+## Data sources
+
+TIMBERS bundles no data. If you use the loaders/scripts:
+
+- **ERA5** reanalysis — Copernicus Climate Change Service (C3S) / ECMWF;
+  downloaded by the user under the C3S licence (used by `timbers.era5`).
+- **Natural Earth** land polygons — public domain (fetched by
+  `scripts/download_natural_earth.py`, used by `timbers.land`).
 
 ## License
 
