@@ -12,7 +12,9 @@ while the route itself is held fixed:
 * ``make_robust_cost`` builds an optimizable chance-constrained objective:
   NOMINAL energy + a risk penalty over the ensemble, penalizing Hs/TWS
   exceedance from the HARD limits (``hs_lim``/``us_lim``) -- the safety buffer is
-  set by the local forecast spread instead of a hand-tuned ``hs_soft``.
+  set by the surrogate's local spread instead of a hand-tuned ``hs_soft``. Note
+  that this spread understates real forecast spread beyond about two days of
+  lead time (see the validity domain below), so the buffer inherits that limit.
 
       J(theta) = E_nominal
                + lam_env * mean_pert[exp(aH*(Hs_p-hs_lim)+) + exp(aU*(TWS_p-us_lim)+) - 2]
@@ -20,6 +22,19 @@ while the route itself is held fixed:
 
 The route geometry/speed is shared across perturbations; only the weather
 sampling is perturbed. vmapped over (population x ensemble) on the GPU.
+
+**Validity domain of the shift/scale surrogate.** Measured against real ECMWF
+ENS (51 members, along-route Hs, two North Atlantic storm departures), the
+surrogate approximately matches real ensemble spread out to about two days of
+lead time (spread ratio 0.75-0.97 at 12-72 h) and understates it beyond:
+1.45-1.89x at 72-144 h, 2.4-6.2x at 144-366 h. The mismatch is structural
+rather than a tuning issue. Real forecast spread grows with lead time, while
+the surrogate's tracks the amplitude of the one field being perturbed, and the
+real member distribution is right-skewed (skew 0.4-1.4), which a symmetric
+shift and scale cannot produce. Use the surrogate as a mechanism demonstration
+or for horizons within about two days. For longer passages, score against real
+ensemble members instead: carry a member axis through the cost, as the
+ensemble-routing study built on TiMBERS does.
 
 Both entry points take an injected ``power_fn(tws, twa_deg, swh, mwa_deg, v, wps)
 -> kW`` (JAX arrays). See ``examples/toy_power.py``.
@@ -29,6 +44,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from . import model as jm
 from . import optimizer as op
@@ -112,8 +128,15 @@ def perturbation_grid(dlat=(0.0,), dlon=(0.0,), dt=(0.0,), hs=(1.0,), wind=(1.0,
 # ---------------------------------------------------------------------------
 def make_robust_cost(grids, land, cor, L, wps, K, n_speed, align, perts, power_fn, *,
                      hs_lim=7.0, us_lim=20.0, aH=8.0, aU=3.0,
-                     lam_env=30.0, lam_land=100.0, nominal_idx=0):
-    """fn(theta_batch, dep_off) -> J (Ppop,). ``perts`` (Pn,5): dlat,dlon,dt,hs_sc,wind_sc."""
+                     lam_env=30.0, lam_land=100.0, nominal_idx=0,
+                     p_lim=float("inf"), aP=6.0):
+    """fn(theta_batch, dep_off) -> J (Ppop,). ``perts`` (Pn,5): dlat,dlon,dt,hs_sc,wind_sc.
+
+    ``p_lim`` is an optional shaft-power ceiling in kW, treated like the Hs and
+    TWS limits: assessed per ensemble member, so the arm sees power feasibility
+    as a distribution rather than a point. The excess is relative
+    (``[p/p_lim - 1]+``) because power is O(1e3) kW. Default inf disables it.
+    """
     o_n = jnp.asarray(cor.norm(cor.o_lat, cor.o_wlon), jnp.float32)
     d_n = jnp.asarray(cor.norm(cor.d_lat, cor.d_wlon), jnp.float32)
     rr = jnp.linspace(0.0, 1.0, L, dtype=jnp.float32)
@@ -169,6 +192,8 @@ def make_robust_cost(grids, land, cor, L, wps, K, n_speed, align, perts, power_f
             energy = jnp.sum(p * seg) / 1000.0
             env = jnp.sum(jnp.exp(aH * jnp.maximum(swh - hs_lim, 0.0))
                           + jnp.exp(aU * jnp.maximum(tws - us_lim, 0.0)) - 2.0)
+            if np.isfinite(p_lim):       # Python-level: p_lim is static
+                env = env + jnp.sum(jnp.exp(aP * jnp.maximum(p / p_lim - 1.0, 0.0)) - 1.0)
             return energy, env
 
         energies, envs = jax.vmap(per_pert)(pert_arr)          # (Pn,), (Pn,)
