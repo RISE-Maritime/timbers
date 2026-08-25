@@ -95,9 +95,22 @@ route held fixed:
   limit with high probability under modest forecast error on storm departures.
 - **Chance-constrained objective** (`make_robust_cost`): minimize *nominal*
   energy + ensemble-mean exceedance from the *hard* limit, so the safety
-  buffer is set by the local forecast spread rather than a hand-tuned
+  buffer is set by the surrogate's local spread rather than a hand-tuned
   `hs_soft`. A real, tunable risk control where `hs_soft` is degenerate
   (trading a lower violation probability for some energy).
+
+**Validity limit of the surrogate, measured.** The shift/scale surrogate was
+compared against real ECMWF ENS (51 members, along-route Hs, two North Atlantic
+storm departures) in the ensemble-routing study built on TiMBERS. It
+approximately matches real ensemble spread out to about two days of lead time
+(spread ratio 0.75–0.97 at 12–72 h) and understates it beyond: 1.45–1.89× at
+72–144 h, 2.4–6.2× at 144–366 h. The mismatch is structural: real forecast
+spread grows with lead time while the surrogate's tracks the amplitude of the
+field being perturbed, and real members are right-skewed (skew 0.4–1.4), which
+a symmetric shift/scale cannot produce. The surrogate is therefore a mechanism
+demonstration and a short-horizon (≲2 day) tool. For multi-day passages, score
+against real ensemble members: thread a member axis through the cost instead of
+perturbing one field.
 
 This reframes deterministic-routing spread as **method vs risk-appetite**.
 `examples/run_risk.py` makes it concrete: it optimizes a deterministic and a
