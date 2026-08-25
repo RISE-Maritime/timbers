@@ -109,7 +109,8 @@ def test_host_scorer_path():
     e = evaluate_route(wind, wave, wps_pts, toy_power_np, wps=False)
     assert np.isfinite(e) and e > 0.0
     full = evaluate_route_full(wind, wave, wps_pts, toy_power_np, wps=False)
-    assert set(full) == {"energy_mwh", "max_wind_mps", "max_hs_m", "sailed_distance_nm"}
+    assert set(full) == {"energy_mwh", "max_wind_mps", "max_hs_m", "max_power_kw",
+                         "sailed_distance_nm"}
     assert full["energy_mwh"] > 0.0
 
 
