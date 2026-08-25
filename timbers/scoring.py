@@ -191,6 +191,7 @@ def evaluate_route_full(
     """Evaluate a route, returning energy and constraint diagnostics.
 
     Returns a dict with keys: ``energy_mwh``, ``max_wind_mps``, ``max_hs_m``,
+    ``max_power_kw``,
     ``sailed_distance_nm``. The energy computation is byte-for-byte the same as
     :func:`evaluate_route`.
     """
@@ -244,5 +245,6 @@ def evaluate_route_full(
         "energy_mwh": energy_mwh,
         "max_wind_mps": float(np.max(tws)),
         "max_hs_m": float(np.max(swh)),
+        "max_power_kw": float(np.max(power_kw)),
         "sailed_distance_nm": float(np.sum(seg_dist_m) / 1852.0),
     }

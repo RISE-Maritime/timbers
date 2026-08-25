@@ -106,6 +106,14 @@ class Penalty:
     aU: float = 2.0
     hs_soft: float = 6.5
     us_soft: float = 19.0
+    # Optional shaft-power ceiling. Without one, a route can buy its way through
+    # any storm at arbitrary power, which understates the value of avoiding
+    # weather. The excess is taken RELATIVE to p_soft: power is O(1e3) kW, so an
+    # absolute excess in an exponential would overflow immediately, whereas
+    # [p/p_soft - 1]+ is O(1) like the Hs and TWS terms. Default inf disables it,
+    # reproducing the unconstrained cost exactly.
+    p_soft: float = float("inf")
+    aP: float = 6.0
 
 
 def _route_cost(fields, axes, land_arrs, cor, dt_h, nt, lon_wrap,
@@ -172,6 +180,9 @@ def _route_cost(fields, axes, land_arrs, cor, dt_h, nt, lon_wrap,
     over_h = jnp.maximum(swh - pen.hs_soft, 0.0)
     over_u = jnp.maximum(tws - pen.us_soft, 0.0)
     p_env = jnp.sum(jnp.exp(pen.aH * over_h) + jnp.exp(pen.aU * over_u) - 2.0)
+    if np.isfinite(pen.p_soft):          # Python-level: pen is static, not traced
+        over_p = jnp.maximum(p / pen.p_soft - 1.0, 0.0)
+        p_env = p_env + jnp.sum(jnp.exp(pen.aP * over_p) - 1.0)
 
     p_land = jnp.sum(_sample_mask(lmask, llat, lwlon, lat, wlon))
 

@@ -43,20 +43,22 @@ def _exact(theta, dep, cor, wind, wave, K, L, NSP, wps, power_fn_host):
                             power_fn_host, wps=wps)
     return dict(lat=lat, wlon=wlon, seg_dt=seg_dt, theta=np.asarray(theta),
                 energy_mwh=s["energy_mwh"], max_hs_m=s["max_hs_m"],
-                max_wind_mps=s["max_wind_mps"], sailed_distance_nm=s["sailed_distance_nm"])
+                max_wind_mps=s["max_wind_mps"], max_power_kw=s["max_power_kw"],
+                sailed_distance_nm=s["sailed_distance_nm"])
 
 
 def solve_corridor(cor, grids, land, pen, deps, wind, wave, *, wps, K, L, NSP, ALIGN,
                    n_seeds, popsize, maxiter, power_fn, power_fn_host,
-                   hs_max=float("inf"), tws_max=float("inf"),
+                   hs_max=float("inf"), tws_max=float("inf"), p_max=float("inf"),
                    sigma0=0.1, chunk=None, base_seed=0, topk=3, polish=False):
     """Batched best-of-``n_seeds`` over all ``deps``. Returns list of result dicts.
 
     ``power_fn`` is the device (JAX) power model used in the GPU cost;
     ``power_fn_host`` is the NumPy power model used by the exact host scorer. Both
     have signature ``(tws, twa, swh, mwa, v, wps) -> kW`` (see ``examples/toy_power``).
-    ``hs_max``/``tws_max`` are the hard feasibility limits used to select among
-    seeds (default: unconstrained). ``polish=True`` applies the local-refinement
+    ``hs_max``/``tws_max``/``p_max`` are the hard feasibility limits used to
+    select among seeds (default: unconstrained). ``p_max`` is a shaft-power
+    ceiling in kW; a route needing more cannot hold its planned schedule. ``polish=True`` applies the local-refinement
     (gradient lateral+speed polish) to each selected route.
     """
     chunk = chunk or auto_chunk(cor, popsize, ALIGN)
@@ -92,7 +94,9 @@ def solve_corridor(cor, grids, land, pen, deps, wind, wave, *, wps, K, L, NSP, A
         order = np.argsort(best_f[d])[:topk]
         cands = [_exact(best_x[d, s], dep, cor, wind, wave, K, L, NSP, wps, power_fn_host)
                  for s in order]
-        feas = [c for c in cands if c["max_hs_m"] <= hs_max and c["max_wind_mps"] <= tws_max]
+        feas = [c for c in cands
+                if c["max_hs_m"] <= hs_max and c["max_wind_mps"] <= tws_max
+                and c.get("max_power_kw", 0.0) <= p_max]
         pool = feas or cands
         best = min(pool, key=lambda c: c["energy_mwh"] if feas else
                    (c["max_hs_m"], c["energy_mwh"]))
