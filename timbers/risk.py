@@ -62,8 +62,10 @@ def make_scorer(grids, cor, wps, power_fn, align=0.25):
     M = int(round(cor.hours / align))
     dt_h, nt, lon_wrap = grids.dt_h, grids.nt, grids.lon_wrap
     # grids threaded as TRACED args (not closed-over) so the jit doesn't bake ~4GB constants.
-    SHARED = ((grids.u10, grids.v10, grids.swh, grids.mwd_sin, grids.mwd_cos),
-              (grids.wlat, grids.wlon, grids.slat, grids.slon))
+    SHARED = (
+        (grids.u10, grids.v10, grids.swh, grids.mwd_sin, grids.mwd_cos),
+        (grids.wlat, grids.wlon, grids.slat, grids.slon),
+    )
 
     def one(lat, wlon_s, seg_dt, dep_off, pert, fields, axes):
         u10f, v10f, swhf, msf, mcf = fields
@@ -72,7 +74,7 @@ def make_scorer(grids, cor, wps, power_fn, align=0.25):
         t_cum = jnp.concatenate([jnp.zeros(1, lat.dtype), jnp.cumsum(seg_dt)])
         tau = jnp.linspace(0.0, cor.hours, M + 1).astype(lat.dtype)
         rlat = jnp.interp(tau, t_cum, lat)
-        rlon = jnp.interp(tau, t_cum, wlon_s)            # signed lon
+        rlon = jnp.interp(tau, t_cum, wlon_s)  # signed lon
         seg = jnp.full((M,), cor.hours / M, lat.dtype)
         # ship geometry/speed from the ACTUAL route (unperturbed)
         dist = jm._haversine_m(rlat[:-1], rlon[:-1], rlat[1:], rlon[1:])
@@ -94,7 +96,7 @@ def make_scorer(grids, cor, wps, power_fn, align=0.25):
         ms = jm._interp(msf, slat, slon, qlat, qlon_w, ti, tf, nt)
         mc = jm._interp(mcf, slat, slon, qlat, qlon_w, ti, tf, nt)
         mwd = jnp.mod(jnp.degrees(jnp.arctan2(ms, mc)), 360.0)
-        tws = jnp.sqrt(u10 ** 2 + v10 ** 2)
+        tws = jnp.sqrt(u10**2 + v10**2)
         wind_from = jnp.mod(180.0 + jnp.degrees(jnp.arctan2(u10, v10)), 360.0)
         twa = jnp.mod(wind_from - bearing, 360.0)
         mwa = jnp.mod(mwd - bearing, 360.0)
@@ -105,7 +107,8 @@ def make_scorer(grids, cor, wps, power_fn, align=0.25):
     @jax.jit
     def _run(lat, wlon_s, seg_dt, dep_off, perts, fields, axes):
         out = jax.vmap(one, in_axes=(None, None, None, None, 0, None, None))(
-            lat, wlon_s, seg_dt, dep_off, perts, fields, axes)
+            lat, wlon_s, seg_dt, dep_off, perts, fields, axes
+        )
         return out[:, 0], out[:, 1], out[:, 2]
 
     def scorer(lat, wlon_s, seg_dt, dep_off, perts):
@@ -120,16 +123,36 @@ def perturbation_grid(dlat=(0.0,), dlon=(0.0,), dt=(0.0,), hs=(1.0,), wind=(1.0,
     import itertools
 
     import numpy as np
+
     rows = [tuple(p) for p in itertools.product(dlat, dlon, dt, hs, wind)]
     return np.array(rows, np.float32)
+
 
 # ---------------------------------------------------------------------------
 # Chance-constrained route cost
 # ---------------------------------------------------------------------------
-def make_robust_cost(grids, land, cor, L, wps, K, n_speed, align, perts, power_fn, *,
-                     hs_lim=7.0, us_lim=20.0, aH=8.0, aU=3.0,
-                     lam_env=30.0, lam_land=100.0, nominal_idx=0,
-                     p_lim=float("inf"), aP=6.0):
+def make_robust_cost(
+    grids,
+    land,
+    cor,
+    L,
+    wps,
+    K,
+    n_speed,
+    align,
+    perts,
+    power_fn,
+    *,
+    hs_lim=7.0,
+    us_lim=20.0,
+    aH=8.0,
+    aU=3.0,
+    lam_env=30.0,
+    lam_land=100.0,
+    nominal_idx=0,
+    p_lim=float("inf"),
+    aP=6.0,
+):
     """fn(theta_batch, dep_off) -> J (Ppop,). ``perts`` (Pn,5): dlat,dlon,dt,hs_sc,wind_sc.
 
     ``p_lim`` is an optional shaft-power ceiling in kW, treated like the Hs and
@@ -156,19 +179,19 @@ def make_robust_cost(grids, land, cor, L, wps, K, n_speed, align, perts, power_f
         ctrl = jnp.concatenate([o_n[None, :], interior, d_n[None, :]], axis=0)
         pts = op.bezier(ctrl, rr)
         seg_dt0 = op.time_alloc(theta[n_geo:], cor.hours, L, n_speed)
-        lat, wlon = cor.denorm(pts[:, 0], pts[:, 1])            # working coords
+        lat, wlon = cor.denorm(pts[:, 0], pts[:, 1])  # working coords
         # scorer-align resample to uniform time
         t_cum = jnp.concatenate([jnp.zeros(1, lat.dtype), jnp.cumsum(seg_dt0)])
         tau = jnp.linspace(0.0, cor.hours, M + 1).astype(lat.dtype)
         rlat = jnp.interp(tau, t_cum, lat)
-        rlon = jnp.interp(tau, t_cum, wlon)                     # working lon
+        rlon = jnp.interp(tau, t_cum, wlon)  # working lon
         seg = jnp.full((M,), cor.hours / M, lat.dtype)
-        glon = op.working_to_signed(rlon)                      # signed for weather/dist
+        glon = op.working_to_signed(rlon)  # signed for weather/dist
         dist = jm._haversine_m(rlat[:-1], glon[:-1], rlat[1:], glon[1:])
         v = dist / (seg * 3600.0)
         bearing = jm._bearing_deg(rlat[:-1], glon[:-1], rlat[1:], glon[1:])
         mid_lat = (rlat[:-1] + rlat[1:]) / 2
-        mid_lon = (glon[:-1] + glon[1:]) / 2                    # signed
+        mid_lon = (glon[:-1] + glon[1:]) / 2  # signed
         cum = jnp.cumsum(seg)
         smid = dep_off + cum - seg / 2
 
@@ -184,21 +207,24 @@ def make_robust_cost(grids, land, cor, L, wps, K, n_speed, align, perts, power_f
             ms = jm._interp(msf, slat, slon, qlat, qlon_w, ti, tf, nt)
             mc = jm._interp(mcf, slat, slon, qlat, qlon_w, ti, tf, nt)
             mwd = jnp.mod(jnp.degrees(jnp.arctan2(ms, mc)), 360.0)
-            tws = jnp.sqrt(u10 ** 2 + v10 ** 2)
+            tws = jnp.sqrt(u10**2 + v10**2)
             wind_from = jnp.mod(180.0 + jnp.degrees(jnp.arctan2(u10, v10)), 360.0)
             twa = jnp.mod(wind_from - bearing, 360.0)
             mwa = jnp.mod(mwd - bearing, 360.0)
             p = power_fn(tws, twa, swh, mwa, v, wps)
             energy = jnp.sum(p * seg) / 1000.0
-            env = jnp.sum(jnp.exp(aH * jnp.maximum(swh - hs_lim, 0.0))
-                          + jnp.exp(aU * jnp.maximum(tws - us_lim, 0.0)) - 2.0)
-            if np.isfinite(p_lim):       # Python-level: p_lim is static
+            env = jnp.sum(
+                jnp.exp(aH * jnp.maximum(swh - hs_lim, 0.0))
+                + jnp.exp(aU * jnp.maximum(tws - us_lim, 0.0))
+                - 2.0
+            )
+            if np.isfinite(p_lim):  # Python-level: p_lim is static
                 env = env + jnp.sum(jnp.exp(aP * jnp.maximum(p / p_lim - 1.0, 0.0)) - 1.0)
             return energy, env
 
-        energies, envs = jax.vmap(per_pert)(pert_arr)          # (Pn,), (Pn,)
+        energies, envs = jax.vmap(per_pert)(pert_arr)  # (Pn,), (Pn,)
         nominal_E = energies[nominal_idx]
-        risk = jnp.mean(envs)                                  # expected ensemble exceedance
+        risk = jnp.mean(envs)  # expected ensemble exceedance
         p_land = jnp.sum(op._sample_mask(lmask, llat, lwlon, rlat, rlon))
         return nominal_E + lam_env * risk + lam_land * p_land
 

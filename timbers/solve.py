@@ -39,18 +39,50 @@ def _exact(theta, dep, cor, wind, wave, K, L, NSP, wps, power_fn_host):
     lat, wlon, seg_dt = op.decode_route(np.asarray(theta), cor, K, L, NSP)
     acc = np.concatenate([[0.0], np.cumsum(seg_dt)])
     t = [dep + timedelta(hours=float(a)) for a in acc]
-    s = evaluate_route_full(wind, wave, list(zip(t, lat, op.working_to_signed(wlon))),
-                            power_fn_host, wps=wps)
-    return dict(lat=lat, wlon=wlon, seg_dt=seg_dt, theta=np.asarray(theta),
-                energy_mwh=s["energy_mwh"], max_hs_m=s["max_hs_m"],
-                max_wind_mps=s["max_wind_mps"], max_power_kw=s["max_power_kw"],
-                sailed_distance_nm=s["sailed_distance_nm"])
+    s = evaluate_route_full(
+        wind, wave, list(zip(t, lat, op.working_to_signed(wlon))), power_fn_host, wps=wps
+    )
+    return dict(
+        lat=lat,
+        wlon=wlon,
+        seg_dt=seg_dt,
+        theta=np.asarray(theta),
+        energy_mwh=s["energy_mwh"],
+        max_hs_m=s["max_hs_m"],
+        max_wind_mps=s["max_wind_mps"],
+        max_power_kw=s["max_power_kw"],
+        sailed_distance_nm=s["sailed_distance_nm"],
+    )
 
 
-def solve_corridor(cor, grids, land, pen, deps, wind, wave, *, wps, K, L, NSP, ALIGN,
-                   n_seeds, popsize, maxiter, power_fn, power_fn_host,
-                   hs_max=float("inf"), tws_max=float("inf"), p_max=float("inf"),
-                   sigma0=0.1, chunk=None, base_seed=0, topk=3, polish=False):
+def solve_corridor(
+    cor,
+    grids,
+    land,
+    pen,
+    deps,
+    wind,
+    wave,
+    *,
+    wps,
+    K,
+    L,
+    NSP,
+    ALIGN,
+    n_seeds,
+    popsize,
+    maxiter,
+    power_fn,
+    power_fn_host,
+    hs_max=float("inf"),
+    tws_max=float("inf"),
+    p_max=float("inf"),
+    sigma0=0.1,
+    chunk=None,
+    base_seed=0,
+    topk=3,
+    polish=False,
+):
     """Batched best-of-``n_seeds`` over all ``deps``. Returns list of result dicts.
 
     ``power_fn`` is the device (JAX) power model used in the GPU cost;
@@ -68,40 +100,73 @@ def solve_corridor(cor, grids, land, pen, deps, wind, wave, *, wps, K, L, NSP, A
     solve = jc.make_solver(fit, x0, sigma0, hp, popsize, maxiter)
 
     D = len(deps)
-    dep_offs = np.array([float((np.datetime64(dp) - wind["t0"]) / np.timedelta64(1, "h"))
-                         for dp in deps], np.float32)
+    dep_offs = np.array(
+        [float((np.datetime64(dp) - wind["t0"]) / np.timedelta64(1, "h")) for dp in deps],
+        np.float32,
+    )
     B = D * n_seeds
-    dep_offs_B = np.repeat(dep_offs, n_seeds)                       # (B,)
-    keys = jax.random.split(jax.random.PRNGKey(base_seed), B)       # (B,2)
+    dep_offs_B = np.repeat(dep_offs, n_seeds)  # (B,)
+    keys = jax.random.split(jax.random.PRNGKey(base_seed), B)  # (B,2)
 
     best_x = np.empty((B, dim), np.float32)
     best_f = np.empty(B, np.float32)
-    for lo in range(0, B, chunk):                                   # chunk to stay in GPU mem
+    for lo in range(0, B, chunk):  # chunk to stay in GPU mem
         hi = min(lo + chunk, B)
         bx, bf = solve(keys[lo:hi], jnp.asarray(dep_offs_B[lo:hi]), shared)
-        best_x[lo:hi] = np.asarray(bx); best_f[lo:hi] = np.asarray(bf)
+        best_x[lo:hi] = np.asarray(bx)
+        best_f[lo:hi] = np.asarray(bf)
     best_x = best_x.reshape(D, n_seeds, dim)
     best_f = best_f.reshape(D, n_seeds)
 
     # Pre-rank seeds by the solver's penalized cost (~ energy + feasibility) and exact-score
     # only the top ``topk`` per dep: cuts the host scorer ~n_seeds/topk x without a second
     # GPU kernel (a metrics jit can OOM host RAM for the heaviest configs).
-    polisher = (pol.make_polisher(grids, land, cor, pen, wps, K, L, NSP, ALIGN,
-                                  power_fn, power_fn_host, hs_max=hs_max, tws_max=tws_max)
-                if polish else None)
+    polisher = (
+        pol.make_polisher(
+            grids,
+            land,
+            cor,
+            pen,
+            wps,
+            K,
+            L,
+            NSP,
+            ALIGN,
+            power_fn,
+            power_fn_host,
+            hs_max=hs_max,
+            tws_max=tws_max,
+        )
+        if polish
+        else None
+    )
     out = []
     for d, dep in enumerate(deps):
         order = np.argsort(best_f[d])[:topk]
-        cands = [_exact(best_x[d, s], dep, cor, wind, wave, K, L, NSP, wps, power_fn_host)
-                 for s in order]
-        feas = [c for c in cands
-                if c["max_hs_m"] <= hs_max and c["max_wind_mps"] <= tws_max
-                and c.get("max_power_kw", 0.0) <= p_max]
+        cands = [
+            _exact(best_x[d, s], dep, cor, wind, wave, K, L, NSP, wps, power_fn_host) for s in order
+        ]
+        feas = [
+            c
+            for c in cands
+            if c["max_hs_m"] <= hs_max
+            and c["max_wind_mps"] <= tws_max
+            and c.get("max_power_kw", 0.0) <= p_max
+        ]
         pool = feas or cands
-        best = min(pool, key=lambda c: c["energy_mwh"] if feas else
-                   (c["max_hs_m"], c["energy_mwh"]))
+        best = min(
+            pool, key=lambda c: c["energy_mwh"] if feas else (c["max_hs_m"], c["energy_mwh"])
+        )
         if polisher is not None:
-            best = polisher(best["lat"], best["wlon"], best["seg_dt"], best["theta"],
-                            float(dep_offs[d]), dep, wind, wave)
+            best = polisher(
+                best["lat"],
+                best["wlon"],
+                best["seg_dt"],
+                best["theta"],
+                float(dep_offs[d]),
+                dep,
+                wind,
+                wave,
+            )
         out.append(best)
     return out
