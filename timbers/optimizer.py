@@ -17,6 +17,7 @@ Cost:  J = energy_MWh + lambda_env * P_env + lambda_land * P_land
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 import jax
@@ -280,3 +281,70 @@ def gc_init_theta(cor, K, n_speed=0):
     fr = np.linspace(0, 1, K)[1:-1]
     interior = o_n[None, :] + fr[:, None] * (d_n - o_n)[None, :]
     return np.concatenate([interior.ravel(), np.zeros(n_speed)])
+
+
+def _bernstein(r, K):
+    """(N, K) Bernstein basis of degree K-1 evaluated at r."""
+    i = np.arange(K)
+    binom = np.array([math.comb(K - 1, k) for k in i], float)
+    r = np.asarray(r, float)[:, None]
+    return binom * r ** i * (1.0 - r) ** (K - 1 - i)
+
+
+def fit_theta_to_track(cor, t_h, lat, lon, *, K, L, n_speed=0):
+    """Least-squares ``theta`` whose decoded route follows a timed track.
+
+    The inverse of :func:`decode_route`: given a track (for instance one sailed
+    with re-planning, or a route from another router) it returns the parameters
+    in this family that come closest, as ``(theta, diag)``. The fitted theta can
+    seed the optimizer, and ``diag`` reports the geometric residual in nautical
+    miles (``resid_nm_rms``, ``resid_nm_max``), which measures whether a single
+    degree-(K-1) curve can represent the track at all.
+
+    The curve is pinned to the corridor's end points, as in ``decode_route``, so
+    only the K-2 interior control points are fitted, on a chord-length
+    parameterisation of the track. The speed profile is fitted by reading the
+    track's time at the L decoded waypoints and inverting ``time_alloc``'s
+    log-weight interpolation for the segment durations. Chord length is only a
+    proxy for the Bezier parameter, so the fitted schedule is approximate: the
+    times are read at slightly shifted points along the curve. ``lon`` is signed and
+    the track should run from the corridor's origin to its destination over
+    ``cor.hours``.
+    """
+    t = np.asarray(t_h, float)
+    keep = np.concatenate([[True], np.diff(t) > 0])   # strictly increasing time
+    t, lat = t[keep], np.asarray(lat, float)[keep]
+    wlon = np.asarray(lon, float)[keep]
+    wlon[1:] = wlon[0] + np.cumsum(((np.diff(wlon) + 180.0) % 360.0) - 180.0)
+    wlon += 360.0 * np.round((cor.o_wlon - wlon[0]) / 360.0)
+
+    pts = np.stack(cor.norm(lat, wlon), axis=1)
+    s = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(pts, axis=0), axis=1))])
+    r = s / s[-1]
+
+    o_n = np.array(cor.norm(cor.o_lat, cor.o_wlon))
+    d_n = np.array(cor.norm(cor.d_lat, cor.d_wlon))
+    B = _bernstein(r, K)
+    ends = np.outer(B[:, 0], o_n) + np.outer(B[:, -1], d_n)
+    interior, *_ = np.linalg.lstsq(B[:, 1:-1], pts - ends, rcond=None)
+
+    f_lat, f_wlon = cor.denorm(*(B[:, 1:-1] @ interior + ends).T)
+    resid_nm = 60.0 * np.hypot(f_lat - lat, (f_wlon - wlon) * np.cos(np.radians(lat)))
+
+    speed = np.zeros(n_speed)
+    if n_speed >= 2:
+        seg_dt = np.maximum(np.diff(np.interp(np.linspace(0.0, 1.0, L), r, t)), 1e-6)
+        n_seg = L - 1
+        seg_r = (np.arange(n_seg) + 0.5) / n_seg
+        ctrl_r = np.linspace(0.0, 1.0, n_speed)
+        idx = np.clip(np.searchsorted(ctrl_r, seg_r) - 1, 0, n_speed - 2)
+        frac = (seg_r - ctrl_r[idx]) / (ctrl_r[1] - ctrl_r[0])
+        W = np.zeros((n_seg, n_speed))
+        W[np.arange(n_seg), idx] = 1.0 - frac
+        W[np.arange(n_seg), idx + 1] = frac
+        lw = np.log(seg_dt)
+        speed, *_ = np.linalg.lstsq(W, lw - lw.mean(), rcond=None)
+
+    theta = np.concatenate([interior.ravel(), speed]).astype(np.float32)
+    return theta, dict(resid_nm_rms=float(np.sqrt(np.mean(resid_nm ** 2))),
+                       resid_nm_max=float(resid_nm.max()))
