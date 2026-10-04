@@ -24,7 +24,6 @@ import jax.numpy as jnp
 import numpy as np
 
 from . import model as jm
-from .model import DeviceGrids
 
 jax.config.update("jax_enable_x64", False)
 
@@ -124,9 +123,24 @@ class Penalty:
     aP: float = 6.0
 
 
-def _route_cost(fields, axes, land_arrs, cor, dt_h, nt, lon_wrap,
-                nlat, nwlon, seg_dt, dep_off, L, wps, pen: Penalty, power_fn,
-                align_dt_h=0.0):
+def _route_cost(
+    fields,
+    axes,
+    land_arrs,
+    cor,
+    dt_h,
+    nt,
+    lon_wrap,
+    nlat,
+    nwlon,
+    seg_dt,
+    dep_off,
+    L,
+    wps,
+    pen: Penalty,
+    power_fn,
+    align_dt_h=0.0,
+):
     """Penalized cost for one route given normalized waypoint coords (L,).
 
     ``seg_dt`` is the (L-1,) array of per-segment durations (hours); uniform for
@@ -188,7 +202,7 @@ def _route_cost(fields, axes, land_arrs, cor, dt_h, nt, lon_wrap,
     over_h = jnp.maximum(swh - pen.hs_soft, 0.0)
     over_u = jnp.maximum(tws - pen.us_soft, 0.0)
     p_env = jnp.sum(jnp.exp(pen.aH * over_h) + jnp.exp(pen.aU * over_u) - 2.0)
-    if np.isfinite(pen.p_soft):          # Python-level: pen is static, not traced
+    if np.isfinite(pen.p_soft):  # Python-level: pen is static, not traced
         over_p = jnp.maximum(p / pen.p_soft - 1.0, 0.0)
         p_env = p_env + jnp.sum(jnp.exp(pen.aP * over_p) - 1.0)
 
@@ -230,8 +244,7 @@ def time_alloc(speed_params, hours, L, n_speed):
 # ---------------------------------------------------------------------------
 # Batched penalized cost
 # ---------------------------------------------------------------------------
-def make_batched_cost(grids, land, cor, L, wps, pen, K, power_fn, n_speed=0,
-                      align_dt_h=0.0):
+def make_batched_cost(grids, land, cor, L, wps, pen, K, power_fn, n_speed=0, align_dt_h=0.0):
     """Return fn(theta_batch, dep_off) -> cost_batch (P,) on device.
 
     ``theta`` packs the 2*(K-2) interior Bezier coords followed by ``n_speed``
@@ -255,15 +268,28 @@ def make_batched_cost(grids, land, cor, L, wps, pen, K, power_fn, n_speed=0,
         ctrl = jnp.concatenate([o_n[None, :], interior, d_n[None, :]], axis=0)
         pts = bezier(ctrl, r)  # (L,2) normalized (nlat, nwlon)
         seg_dt = time_alloc(theta[n_geo:], cor.hours, L, n_speed)
-        cost, *_ = _route_cost(fields, axes, land_arrs, cor, dt_h, nt, lon_wrap,
-                               pts[:, 0], pts[:, 1], seg_dt, dep_off, L, wps, pen,
-                               power_fn, align_dt_h)
+        cost, *_ = _route_cost(
+            fields,
+            axes,
+            land_arrs,
+            cor,
+            dt_h,
+            nt,
+            lon_wrap,
+            pts[:, 0],
+            pts[:, 1],
+            seg_dt,
+            dep_off,
+            L,
+            wps,
+            pen,
+            power_fn,
+            align_dt_h,
+        )
         return cost
 
     batched = jax.jit(jax.vmap(one, in_axes=(0, None, None, None, None)))
-    return lambda tb, dep_off: batched(
-        tb, jnp.float32(dep_off), fields, axes, land_arrs
-    )
+    return lambda tb, dep_off: batched(tb, jnp.float32(dep_off), fields, axes, land_arrs)
 
 
 def decode_route(theta, cor, K, L, n_speed=0):
@@ -276,8 +302,7 @@ def decode_route(theta, cor, K, L, n_speed=0):
     r = jnp.linspace(0.0, 1.0, L, dtype=jnp.float32)
     pts = np.array(bezier(ctrl, r))
     lat, wlon = cor.denorm(pts[:, 0], pts[:, 1])
-    seg_dt = np.array(time_alloc(
-        jnp.asarray(theta[n_geo:], jnp.float32), cor.hours, L, n_speed))
+    seg_dt = np.array(time_alloc(jnp.asarray(theta[n_geo:], jnp.float32), cor.hours, L, n_speed))
     return lat, wlon, seg_dt
 
 

@@ -100,12 +100,8 @@ def evaluate_route(
     lons = np.array([wp[2] for wp in waypoints])
 
     # Segment dt in hours
-    wp_times = np.array(
-        [np.datetime64(wp[0]) for wp in waypoints], dtype="datetime64[s]"
-    )
-    seg_dt_h = ((wp_times[1:] - wp_times[:-1]) / np.timedelta64(1, "h")).astype(
-        np.float64
-    )
+    wp_times = np.array([np.datetime64(wp[0]) for wp in waypoints], dtype="datetime64[s]")
+    seg_dt_h = ((wp_times[1:] - wp_times[:-1]) / np.timedelta64(1, "h")).astype(np.float64)
     seg_dt_h = np.maximum(seg_dt_h, 1e-6)
 
     # Normalize longitudes for ERA5 grid
@@ -203,12 +199,8 @@ def evaluate_route_full(
     lats = np.array([wp[1] for wp in waypoints])
     lons = np.array([wp[2] for wp in waypoints])
 
-    wp_times = np.array(
-        [np.datetime64(wp[0]) for wp in waypoints], dtype="datetime64[s]"
-    )
-    seg_dt_h = ((wp_times[1:] - wp_times[:-1]) / np.timedelta64(1, "h")).astype(
-        np.float64
-    )
+    wp_times = np.array([np.datetime64(wp[0]) for wp in waypoints], dtype="datetime64[s]")
+    seg_dt_h = ((wp_times[1:] - wp_times[:-1]) / np.timedelta64(1, "h")).astype(np.float64)
     seg_dt_h = np.maximum(seg_dt_h, 1e-6)
 
     grid_lon = wind_grid["lon"]

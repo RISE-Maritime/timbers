@@ -12,9 +12,7 @@ _R_EARTH_M = 6_371_000.0
 
 def _to_xyz(lat_deg, lon_deg):
     lat, lon = np.radians(lat_deg), np.radians(lon_deg)
-    return np.array(
-        [np.cos(lat) * np.cos(lon), np.cos(lat) * np.sin(lon), np.sin(lat)]
-    )
+    return np.array([np.cos(lat) * np.cos(lon), np.cos(lat) * np.sin(lon), np.sin(lat)])
 
 
 def great_circle_points(
