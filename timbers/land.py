@@ -38,8 +38,9 @@ def _load_land_union(ne_dir: Path):
     return unary_union(geoms)
 
 
-def build_mask(box, res_deg: float = RES_DEG, ne_dir: Path = NE_DIR,
-               cache: Path | None = None) -> dict:
+def build_mask(
+    box, res_deg: float = RES_DEG, ne_dir: Path = NE_DIR, cache: Path | None = None
+) -> dict:
     """Build (and optionally cache) the land raster for a corridor box.
 
     ``box`` is ``(lat_min, lat_max, wlon_min, wlon_max)`` in the continuous
