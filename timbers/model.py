@@ -104,8 +104,7 @@ def _bearing_deg(lat1, lon1, lat2, lon2):
     return jnp.mod(jnp.degrees(jnp.arctan2(x, y)), 360.0)
 
 
-def route_energy(grids: DeviceGrids, lats, lons, seg_dt_h, dep_offset_h, wps: bool,
-                 power_fn):
+def route_energy(grids: DeviceGrids, lats, lons, seg_dt_h, dep_offset_h, wps: bool, power_fn):
     """Total energy (MWh) for a single polyline route.
 
     Parameters

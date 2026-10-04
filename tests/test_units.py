@@ -15,7 +15,7 @@ def test_time_alloc_sums_to_passage_time():
         w = jnp.asarray(rng.standard_normal(n_speed), jnp.float32)
         seg = time_alloc(w, 354.0, 400, n_speed)
         assert seg.shape == (399,)
-        assert float(jnp.min(seg)) > 0.0          # strictly positive durations
+        assert float(jnp.min(seg)) > 0.0  # strictly positive durations
         np.testing.assert_allclose(float(jnp.sum(seg)), 354.0, rtol=1e-5)
 
 

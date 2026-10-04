@@ -32,18 +32,26 @@ T0 = np.datetime64("2024-01-01T00:00:00", "s")
 
 
 def _grid():
-    lat = np.arange(35.0, 50.001, 0.5, dtype=np.float64)        # ascending
-    lon = np.arange(-75.0, 5.001, 0.5, dtype=np.float64)        # signed -> lon_wrap False
+    lat = np.arange(35.0, 50.001, 0.5, dtype=np.float64)  # ascending
+    lon = np.arange(-75.0, 5.001, 0.5, dtype=np.float64)  # signed -> lon_wrap False
     nt = 73
     times = T0 + np.arange(nt) * np.timedelta64(1, "h")
     Y, X = lat.size, lon.size
     tt = np.arange(nt)[:, None, None]
     yy = np.arange(Y)[None, :, None]
     xx = np.arange(X)[None, None, :]
-    u10 = (5.0 + 3.0 * np.sin(0.1 * tt + 0.05 * xx)).astype(np.float32) * np.ones((nt, Y, X), np.float32)
-    v10 = (-4.0 + 2.0 * np.cos(0.08 * tt + 0.04 * yy)).astype(np.float32) * np.ones((nt, Y, X), np.float32)
-    swh = (1.5 + 0.6 * np.sin(0.07 * tt + 0.03 * xx)).astype(np.float32) * np.ones((nt, Y, X), np.float32)
-    mwd = np.mod(200.0 + 20.0 * np.cos(0.05 * tt) + 0.0 * xx, 360.0).astype(np.float32) * np.ones((nt, Y, X), np.float32)
+    u10 = (5.0 + 3.0 * np.sin(0.1 * tt + 0.05 * xx)).astype(np.float32) * np.ones(
+        (nt, Y, X), np.float32
+    )
+    v10 = (-4.0 + 2.0 * np.cos(0.08 * tt + 0.04 * yy)).astype(np.float32) * np.ones(
+        (nt, Y, X), np.float32
+    )
+    swh = (1.5 + 0.6 * np.sin(0.07 * tt + 0.03 * xx)).astype(np.float32) * np.ones(
+        (nt, Y, X), np.float32
+    )
+    mwd = np.mod(200.0 + 20.0 * np.cos(0.05 * tt) + 0.0 * xx, 360.0).astype(np.float32) * np.ones(
+        (nt, Y, X), np.float32
+    )
     base = dict(lat=lat, lon=lon, times=times, t0=times[0], dt_h=1.0)
     wind = {**base, "u10": u10, "v10": v10}
     wave = {**base, "swh": swh, "mwd": mwd}
@@ -58,7 +66,7 @@ def _device_grids():
 def _land():
     llat = np.arange(35.0, 50.001, 1.0)
     lwlon = np.arange(-75.0, 5.001, 1.0)
-    mask = np.zeros((llat.size, lwlon.size), np.float32)        # all water
+    mask = np.zeros((llat.size, lwlon.size), np.float32)  # all water
     return op.DeviceLand({"lat": llat, "wlon": lwlon, "mask": mask})
 
 
@@ -66,8 +74,9 @@ def test_device_optimizer_reduces_cost_and_pins_endpoints():
     grids, _, _ = _device_grids()
     land = _land()
     pen = op.Penalty()
-    fit, x0, shared = jrf.build_fit(COR, grids, land, pen, K, NSP, L, ALIGN,
-                                    wps=False, power_fn=toy_power_jax)
+    fit, x0, shared = jrf.build_fit(
+        COR, grids, land, pen, K, NSP, L, ALIGN, wps=False, power_fn=toy_power_jax
+    )
     dim = 2 * (K - 2) + NSP
     cargs0 = (jnp.float32(0.0),) + tuple(shared)
     init_cost = float(fit(x0[None, :], cargs0)[0])
@@ -79,7 +88,7 @@ def test_device_optimizer_reduces_cost_and_pins_endpoints():
     best_x, best_f = np.asarray(best_x), np.asarray(best_f)
 
     assert np.isfinite(best_f).all()
-    assert best_f[0] <= init_cost + 1e-3                        # never worse than init
+    assert best_f[0] <= init_cost + 1e-3  # never worse than init
 
     lat, wlon, seg_dt = op.decode_route(best_x[0], COR, K, L, NSP)
     np.testing.assert_allclose([lat[0], wlon[0]], [COR.o_lat, COR.o_wlon], atol=1e-3)
@@ -92,9 +101,15 @@ def test_route_energy_model_path():
     grids, _, _ = _device_grids()
     lat, wlon, seg_dt = op.decode_route(op.gc_init_theta(COR, K, NSP), COR, K, L, NSP)
     signed = op.working_to_signed(wlon)
-    e = jm.route_energy(grids, jnp.asarray(lat, jnp.float32),
-                        jnp.asarray(signed, jnp.float32),
-                        jnp.asarray(seg_dt, jnp.float32), 0.0, False, toy_power_jax)
+    e = jm.route_energy(
+        grids,
+        jnp.asarray(lat, jnp.float32),
+        jnp.asarray(signed, jnp.float32),
+        jnp.asarray(seg_dt, jnp.float32),
+        0.0,
+        False,
+        toy_power_jax,
+    )
     e = float(e)
     assert np.isfinite(e) and e > 0.0
 
@@ -104,13 +119,20 @@ def test_host_scorer_path():
     lat, wlon, seg_dt = op.decode_route(op.gc_init_theta(COR, K, NSP), COR, K, L, NSP)
     signed = op.working_to_signed(wlon)
     acc = np.concatenate([[0.0], np.cumsum(seg_dt)])
-    wps_pts = [(T0.item() + timedelta(hours=float(a)), float(la), float(lo))
-               for a, la, lo in zip(acc, lat, signed)]
+    wps_pts = [
+        (T0.item() + timedelta(hours=float(a)), float(la), float(lo))
+        for a, la, lo in zip(acc, lat, signed)
+    ]
     e = evaluate_route(wind, wave, wps_pts, toy_power_np, wps=False)
     assert np.isfinite(e) and e > 0.0
     full = evaluate_route_full(wind, wave, wps_pts, toy_power_np, wps=False)
-    assert set(full) == {"energy_mwh", "max_wind_mps", "max_hs_m", "max_power_kw",
-                         "sailed_distance_nm"}
+    assert set(full) == {
+        "energy_mwh",
+        "max_wind_mps",
+        "max_hs_m",
+        "max_power_kw",
+        "sailed_distance_nm",
+    }
     assert full["energy_mwh"] > 0.0
 
 
@@ -119,20 +141,39 @@ def _storm_grid():
     wind, wave = _grid()
     lon = wind["lon"]
     tt = np.arange(wind["u10"].shape[0])[:, None, None]
-    blob = (np.exp(-((tt - 24.0) / 4.0) ** 2)
-            * np.exp(-((lon[None, None, :] - (-37.0)) / 6.0) ** 2))
-    wind = {**wind, "u10": wind["u10"] + (28.0 * blob).astype(np.float32),
-            "v10": wind["v10"] + (18.0 * blob).astype(np.float32)}
+    blob = np.exp(-(((tt - 24.0) / 4.0) ** 2)) * np.exp(
+        -(((lon[None, None, :] - (-37.0)) / 6.0) ** 2)
+    )
+    wind = {
+        **wind,
+        "u10": wind["u10"] + (28.0 * blob).astype(np.float32),
+        "v10": wind["v10"] + (18.0 * blob).astype(np.float32),
+    }
     wave = {**wave, "swh": wave["swh"] + (5.0 * blob).astype(np.float32)}
     return jm.DeviceGrids(wind, wave), wind, wave
 
 
 def _solve(grids, wind, wave, land, n_speed):
     return oj.solve_corridor(
-        COR, grids, land, op.Penalty(), [datetime(2024, 1, 1)], wind, wave,
-        wps=False, K=K, L=L, NSP=n_speed, ALIGN=ALIGN,
-        n_seeds=2, popsize=48, maxiter=100, base_seed=0,
-        power_fn=toy_power_jax, power_fn_host=toy_power_np, polish=False,
+        COR,
+        grids,
+        land,
+        op.Penalty(),
+        [datetime(2024, 1, 1)],
+        wind,
+        wave,
+        wps=False,
+        K=K,
+        L=L,
+        NSP=n_speed,
+        ALIGN=ALIGN,
+        n_seeds=2,
+        popsize=48,
+        maxiter=100,
+        base_seed=0,
+        power_fn=toy_power_jax,
+        power_fn_host=toy_power_np,
+        polish=False,
     )[0]["energy_mwh"]
 
 
@@ -141,10 +182,10 @@ def test_explicit_speed_beats_uniform_under_storm():
     on a storm the explicit-speed profile must not cost more energy."""
     grids, wind, wave = _storm_grid()
     land = _land()
-    e_bers = _solve(grids, wind, wave, land, 0)        # uniform speed = BERS
-    e_timbers = _solve(grids, wind, wave, land, 6)     # + explicit speed
-    assert e_timbers <= e_bers * (1.0 + 1e-3)          # never meaningfully worse
-    assert e_timbers < e_bers                          # and strictly better here
+    e_bers = _solve(grids, wind, wave, land, 0)  # uniform speed = BERS
+    e_timbers = _solve(grids, wind, wave, land, 6)  # + explicit speed
+    assert e_timbers <= e_bers * (1.0 + 1e-3)  # never meaningfully worse
+    assert e_timbers < e_bers  # and strictly better here
 
 
 def test_risk_scorer_and_robust_cost():
@@ -163,21 +204,32 @@ def test_risk_scorer_and_robust_cost():
     signed = op.working_to_signed(wlon)
 
     scorer = rk.make_scorer(grids, COR, False, toy_power_jax, align=ALIGN)
-    E, Hs, TWS = scorer(jnp.asarray(lat, jnp.float32), jnp.asarray(signed, jnp.float32),
-                        jnp.asarray(seg, jnp.float32), 0.0, perts)
+    E, Hs, TWS = scorer(
+        jnp.asarray(lat, jnp.float32),
+        jnp.asarray(signed, jnp.float32),
+        jnp.asarray(seg, jnp.float32),
+        0.0,
+        perts,
+    )
     E, Hs, TWS = np.asarray(E), np.asarray(Hs), np.asarray(TWS)
     assert E.shape == Hs.shape == TWS.shape == (len(perts),)
     assert np.isfinite(E).all() and (E > 0).all()
     # nominal-member energy matches the plain host scorer on the same route
     e_nom = evaluate_route_full(
-        wind, wave,
-        [(T0.item() + timedelta(hours=float(a)), float(la), float(lo))
-         for a, la, lo in zip(np.concatenate([[0.0], np.cumsum(seg)]), lat, signed)],
-        toy_power_np, wps=False)["energy_mwh"]
-    assert abs(E[0] - e_nom) / e_nom < 0.02            # same physics, ±resample/precision
+        wind,
+        wave,
+        [
+            (T0.item() + timedelta(hours=float(a)), float(la), float(lo))
+            for a, la, lo in zip(np.concatenate([[0.0], np.cumsum(seg)]), lat, signed)
+        ],
+        toy_power_np,
+        wps=False,
+    )["energy_mwh"]
+    assert abs(E[0] - e_nom) / e_nom < 0.02  # same physics, ±resample/precision
 
-    cost = rk.make_robust_cost(grids, land, COR, L, False, K, 4, ALIGN, perts,
-                               toy_power_jax, hs_lim=7.0, us_lim=20.0)
+    cost = rk.make_robust_cost(
+        grids, land, COR, L, False, K, 4, ALIGN, perts, toy_power_jax, hs_lim=7.0, us_lim=20.0
+    )
     J = np.asarray(cost(jnp.asarray(theta, jnp.float32)[None, :], 0.0))
     assert J.shape == (1,) and np.isfinite(J).all()
 
@@ -187,10 +239,24 @@ def test_solve_corridor_backend():
     land = _land()
     deps = [datetime(2024, 1, 1, 0, 0, 0)]
     out = oj.solve_corridor(
-        COR, grids, land, op.Penalty(), deps, wind, wave,
-        wps=False, K=K, L=L, NSP=NSP, ALIGN=ALIGN,
-        n_seeds=2, popsize=16, maxiter=20,
-        power_fn=toy_power_jax, power_fn_host=toy_power_np, polish=False,
+        COR,
+        grids,
+        land,
+        op.Penalty(),
+        deps,
+        wind,
+        wave,
+        wps=False,
+        K=K,
+        L=L,
+        NSP=NSP,
+        ALIGN=ALIGN,
+        n_seeds=2,
+        popsize=16,
+        maxiter=20,
+        power_fn=toy_power_jax,
+        power_fn_host=toy_power_np,
+        polish=False,
     )
     assert len(out) == 1
     r = out[0]
