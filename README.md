@@ -86,7 +86,14 @@ backend, all on synthetic grids with the toy power model.
   `make_polisher` take both (`power_fn`, `power_fn_host`).
 - **Corridor**: an `optimizer.Corridor` (port endpoints in a continuous
   working-longitude frame + passage time) and an optional land mask from
-  `timbers.land.build_mask`.
+  `timbers.land.build_mask`. Pass the mask through
+  `timbers.land.exclusion_raster` to add further exclusions (shallow water, a
+  `domain` box kept inside the weather grid) and a ramp that grows with
+  distance from open water, so a route that strays inland is pushed back out.
+  Land is a hard constraint by default (`Penalty.lambda_land = 1e6`), and
+  `load_era5` fills land-masked wave cells from the nearest sea cell
+  (`land_fill="nearest"`) rather than with zero, which would make land read as
+  calm water.
 
 ## Attribution
 

@@ -65,3 +65,54 @@ def build_mask(box, res_deg: float = RES_DEG, ne_dir: Path = NE_DIR,
         Path(cache).parent.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(cache, lat=lat, wlon=wlon, mask=mask)
     return {"lat": lat, "wlon": wlon, "mask": mask}
+
+
+# How fast the exclusion grows with penetration, per degree of distance from the
+# nearest open water. On a 0/1 raster the bilinear sample is flat more than one
+# cell inside the mask, so every candidate that has wandered in looks equally
+# bad and the search has no signal pointing back to the water. Ramping with
+# depth gives that signal: from anywhere inside, moving towards the nearest
+# water lowers the cost. Depth is measured in degrees on the raster grid, which
+# is not metric; only monotonicity in penetration is needed.
+INLAND_RAMP_PER_DEG = 1.0
+
+
+def exclusion_raster(land: dict, *, extra=None, domain=None,
+                     ramp: float = INLAND_RAMP_PER_DEG) -> dict:
+    """Combine static exclusions into one raster with no flat interior.
+
+    ``land`` is a raster from :func:`build_mask`. ``extra`` is an optional
+    boolean (Y, X) array of further cells the ship must not enter on the same
+    grid, for example water shallower than a draught limit derived from a
+    bathymetry such as GEBCO. ``domain`` is an optional
+    ``(lat_min, lat_max, wlon_min, wlon_max)`` box; cells outside it are
+    excluded. Set it inside the weather grid: weather interpolation clamps at
+    the grid edge, so a route that leaves the grid reads a constant field and
+    the objective there means nothing.
+
+    Returns the same dict layout with ``mask`` no longer binary: open water is
+    0.0, and excluded cells carry 1.0 plus ``ramp`` per degree of distance to
+    the nearest open water. ``ramp=0`` returns the plain 0/1 union. The penalty
+    code samples and sums the raster, so it works unchanged on the result.
+    """
+    from scipy.ndimage import distance_transform_edt
+
+    lat = np.asarray(land["lat"]); wlon = np.asarray(land["wlon"])
+    m = (np.asarray(land["mask"]) > 0).astype(np.float32)
+    if extra is not None:
+        extra = np.asarray(extra, bool)
+        if extra.shape != m.shape:
+            raise ValueError(f"extra {extra.shape} does not match the raster {m.shape}")
+        m = np.maximum(m, extra.astype(np.float32))
+    if domain is not None:
+        la0, la1, wl0, wl1 = domain
+        outside = (((lat < la0) | (lat > la1))[:, None]
+                   | ((wlon < wl0) | (wlon > wl1))[None, :])
+        m = np.maximum(m, outside.astype(np.float32))
+    if m.all():
+        raise ValueError("every cell is excluded")
+    if ramp:
+        d = distance_transform_edt(m > 0, sampling=(abs(lat[1] - lat[0]),
+                                                    abs(wlon[1] - wlon[0])))
+        m = m + ramp * d.astype(np.float32)
+    return {"lat": lat, "wlon": wlon, "mask": m}

@@ -128,7 +128,7 @@ def perturbation_grid(dlat=(0.0,), dlon=(0.0,), dt=(0.0,), hs=(1.0,), wind=(1.0,
 # ---------------------------------------------------------------------------
 def make_robust_cost(grids, land, cor, L, wps, K, n_speed, align, perts, power_fn, *,
                      hs_lim=7.0, us_lim=20.0, aH=8.0, aU=3.0,
-                     lam_env=30.0, lam_land=100.0, nominal_idx=0,
+                     lam_env=30.0, lam_land=1e6, nominal_idx=0,
                      p_lim=float("inf"), aP=6.0):
     """fn(theta_batch, dep_off) -> J (Ppop,). ``perts`` (Pn,5): dlat,dlon,dt,hs_sc,wind_sc.
 
