@@ -94,6 +94,13 @@ backend, all on synthetic grids with the toy power model.
   The device path (`timbers.model`/`timbers.optimizer`) calls it on JAX arrays;
   the host scorer (`timbers.scoring`) on NumPy arrays — `solve_corridor` and
   `make_polisher` take both (`power_fn`, `power_fn_host`).
+- **Scoring**: `timbers.scoring.evaluate_route` and `evaluate_route_full`
+  score a route on its planned schedule. `evaluate_route_saturated` sails it
+  forward under a shaft-power ceiling: where the weather demands more power
+  than the ceiling, the ship slows down and arrives late, so arrival time is an
+  outcome rather than an input. `max_hours` and `t_offset_h` let a voyage be
+  sailed in pieces, for example between re-plans. `v_max_for_power` gives the
+  largest speed within the ceiling for given weather.
 - **Corridor**: an `optimizer.Corridor` (port endpoints in a continuous
   working-longitude frame + passage time) and an optional land mask from
   `timbers.land.build_mask`.
