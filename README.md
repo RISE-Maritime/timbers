@@ -14,7 +14,8 @@ out to be the first-order energy lever; global geometry is not.
 
 > **Bring your own power model and cases.** This is a *method* library: the
 > optimizer, the GPU sep-CMA-ES, the differentiable cost, the gradient polish,
-> the land mask, the ERA5 loader, and the risk-aware extension. It does **not**
+> the land mask, the ERA5 loader, the risk-aware extension and forecast-ensemble
+> objectives. It does **not**
 > include any vessel performance model or routing cases — you inject a
 > `power_fn(tws, twa_deg, swh, mwa_deg, v, wps) -> kW` and supply your own
 > corridors/weather. A trivial toy model and a runnable demo are in
@@ -39,6 +40,15 @@ out to be the first-order energy lever; global geometry is not.
 5. **Risk-aware extension** (`timbers.risk`). Perturbation-fragility scoring
    and a chance-constrained objective over a forecast-error surrogate ensemble
    (spatial/temporal shift + amplitude scale of the weather sampling).
+6. **Forecast-ensemble objectives** (`timbers.ensemble`). The route cost
+   evaluated over a real ensemble (fields with a member axis and non-uniform
+   forecast steps, e.g. ECMWF ENS), with four objectives that differ only in
+   how members are reduced: cost from the nominal member or the member mean,
+   safety from the nominal member or an ensemble chance constraint
+   (`deterministic`, `expected_value`, `chance_constrained`, `joint`).
+   `score_members` gives per-member outcomes of a fixed route, `member_series`
+   per-segment values along a timed track, and `as_ensemble` wraps a single
+   field (e.g. ERA5) as a one-member ensemble for perfect-information solves.
 
 Details, design rationale, and negative results: [docs/method.md](docs/method.md).
 
