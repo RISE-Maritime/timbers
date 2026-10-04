@@ -84,16 +84,22 @@ class EnsembleGrids:
         self.mwd_sin = jnp.asarray(np.sin(mwd, dtype=np.float32))
         self.mwd_cos = jnp.asarray(np.cos(mwd, dtype=np.float32))
         del mwd
-        for name, arr in (("u10", self.u10), ("v10", self.v10), ("swh", self.swh),
-                          ("mwd_sin", self.mwd_sin), ("mwd_cos", self.mwd_cos)):
+        for name, arr in (
+            ("u10", self.u10),
+            ("v10", self.v10),
+            ("swh", self.swh),
+            ("mwd_sin", self.mwd_sin),
+            ("mwd_cos", self.mwd_cos),
+        ):
             if not bool(jnp.all(jnp.isfinite(arr))):
                 n = int(jnp.sum(~jnp.isfinite(arr)))
-                raise ValueError(f"{name} has {n:,} non-finite values; fill land-masked "
-                                 "cells before use (timbers.seafill)")
+                raise ValueError(
+                    f"{name} has {n:,} non-finite values; fill land-masked "
+                    "cells before use (timbers.seafill)"
+                )
         self.n_members = self.u10.shape[0]
         self.nt = self.u10.shape[1]
-        self.lon_wrap = bool(np.asarray(wind["lon"])[0] >= 0
-                             and np.asarray(wind["lon"])[-1] > 180)
+        self.lon_wrap = bool(np.asarray(wind["lon"])[0] >= 0 and np.asarray(wind["lon"])[-1] > 180)
 
 
 def as_ensemble(wind: dict, wave: dict, start, hours: float) -> EnsembleGrids:
@@ -103,17 +109,23 @@ def as_ensemble(wind: dict, wave: dict, start, hours: float) -> EnsembleGrids:
     (uniform ``dt_h``). The result starts at ``start`` (a datetime) and covers
     ``hours``, so a route can be optimised on known weather (for example ERA5,
     to obtain a perfect-information solution) with the same cost and scoring
-    code as a forecast ensemble.
+    code as a forecast ensemble. ``start`` must fall on a time step of both
+    grids, and both must cover ``start + hours``; otherwise ``ValueError``.
     """
     t0 = np.datetime64(start.replace(tzinfo=None), "s")
     out = {}
     for name, g, keys in (("wind", wind, ("u10", "v10")), ("wave", wave, ("swh", "mwd"))):
         dt = float(g["dt_h"])
-        i0 = int(round(float((t0 - g["t0"]) / np.timedelta64(1, "h")) / dt))
+        off = float((t0 - g["t0"]) / np.timedelta64(1, "h")) / dt
+        i0 = int(round(off))
+        if abs(off - i0) > 1e-6:
+            raise ValueError(f"{start} is not on a time step of the {name} grid")
         if i0 < 0:
             raise ValueError(f"{name} grid starts after {start}")
         n = int(hours / dt) + 3
-        out[name] = {k: np.asarray(g[k][i0:i0 + n])[None] for k in keys}
+        out[name] = {k: np.asarray(g[k][i0 : i0 + n])[None] for k in keys}
+        if out[name][keys[0]].shape[1] < math.ceil(hours / dt) + 1:
+            raise ValueError(f"{name} grid ends before {start} + {hours} h")
         out[name]["lat"], out[name]["lon"] = g["lat"], g["lon"]
     n = min(out["wind"]["u10"].shape[1], out["wave"]["swh"].shape[1])
     for side, keys in (("wind", ("u10", "v10")), ("wave", ("swh", "mwd"))):
@@ -170,10 +182,29 @@ def _p_hat(margins, sharpness):
     return jnp.mean(jax.nn.sigmoid(sharpness * margins), axis=-1)
 
 
-def make_ensemble_cost(grids, land, cor, *, objective, L, K, n_speed, align, wps,
-                       power_fn, hs_lim, tws_lim, p_lim=float("inf"), eps=0.1,
-                       lam_env=30.0, lam_land=1e6, a_env=6.0, soft_frac=0.93,
-                       safety_mode="prob", sharpness=50.0):
+def make_ensemble_cost(
+    grids,
+    land,
+    cor,
+    *,
+    objective,
+    L,
+    K,
+    n_speed,
+    align,
+    wps,
+    power_fn,
+    hs_lim,
+    tws_lim,
+    p_lim=float("inf"),
+    eps=0.1,
+    lam_env=30.0,
+    lam_land=1e6,
+    a_env=6.0,
+    soft_frac=0.93,
+    safety_mode="prob",
+    sharpness=50.0,
+):
     """Return ``(fit, shared)`` for :func:`timbers.cmaes.run`.
 
     ``fit(theta_batch, cargs)`` with ``cargs = (dep_off, *shared)``, where
@@ -252,8 +283,9 @@ def make_ensemble_cost(grids, land, cor, *, objective, L, K, n_speed, align, wps
         v = jm._haversine_m(rlat[:-1], glon[:-1], rlat[1:], glon[1:]) / (seg * 3600.0)
         bearing = jm._bearing_deg(rlat[:-1], glon[:-1], rlat[1:], glon[1:])
         mid_lat = (rlat[:-1] + rlat[1:]) / 2
-        mid_lon = (glon[:-1] + glon[1:]) / 2
-        mid_lon_q = jnp.where(mid_lon < 0, mid_lon + 360.0, mid_lon) if lon_wrap else mid_lon
+        # Wrap before averaging, so a segment across 180 has its midpoint at 180.
+        glon_q = jnp.where(glon < 0, glon + 360.0, glon) if lon_wrap else glon
+        mid_lon_q = (glon_q[:-1] + glon_q[1:]) / 2
         ti, tf = time_index(dep_off + jnp.cumsum(seg) - seg / 2, steps)
 
         def per_member(u10m, v10m, swhm, msm, mcm):
@@ -264,14 +296,18 @@ def make_ensemble_cost(grids, land, cor, *, objective, L, K, n_speed, align, wps
             ms = jm._interp(msm, slat, slon, mid_lat, mid_lon_q, ti, tf, nt)
             mc = jm._interp(mcm, slat, slon, mid_lat, mid_lon_q, ti, tf, nt)
             mwd = jnp.mod(jnp.degrees(jnp.arctan2(ms, mc)), 360.0)
-            tws = jnp.sqrt(u10 ** 2 + v10 ** 2)
+            tws = jnp.sqrt(u10**2 + v10**2)
             wind_from = jnp.mod(180.0 + jnp.degrees(jnp.arctan2(u10, v10)), 360.0)
-            p = power_fn(tws, jnp.mod(wind_from - bearing, 360.0), swh,
-                         jnp.mod(mwd - bearing, 360.0), v, wps)
+            p = power_fn(
+                tws, jnp.mod(wind_from - bearing, 360.0), swh, jnp.mod(mwd - bearing, 360.0), v, wps
+            )
             energy = jnp.sum(p * seg) / 1000.0
             margin = jnp.max(jnp.stack([swh / hs_lim, tws / tws_lim])) - 1.0
-            terms = (_sexp(a_env * jnp.maximum(swh / (soft_frac * hs_lim) - 1.0, 0.0))
-                     + _sexp(a_env * jnp.maximum(tws / (soft_frac * tws_lim) - 1.0, 0.0)) - 2.0)
+            terms = (
+                _sexp(a_env * jnp.maximum(swh / (soft_frac * hs_lim) - 1.0, 0.0))
+                + _sexp(a_env * jnp.maximum(tws / (soft_frac * tws_lim) - 1.0, 0.0))
+                - 2.0
+            )
             if finite_p:
                 terms = terms + _sexp(a_env * jnp.maximum(p / (soft_frac * p_lim) - 1.0, 0.0)) - 1.0
             return energy, margin, pen_scale * jnp.sum(terms)
@@ -286,7 +322,10 @@ def make_ensemble_cost(grids, land, cor, *, objective, L, K, n_speed, align, wps
             risk = _sexp(a_env * excess) - 1.0
         else:
             risk = softs[0]
-        p_land = pen_scale * jnp.sum(op._sample_mask(lmask, llat, lwlon, rlat, rlon))
+        # The end points are the fixed ports, the same for every candidate; a
+        # port touching the raster would only add a constant that, in float32,
+        # rounds away small energy differences.
+        p_land = pen_scale * jnp.sum(op._sample_mask(lmask, llat, lwlon, rlat[1:-1], rlon[1:-1]))
         return cost + lam_env * risk + lam_land * p_land
 
     batched = jax.jit(jax.vmap(one, in_axes=(0, None, None, None, None)))
@@ -298,8 +337,21 @@ def make_ensemble_cost(grids, land, cor, *, objective, L, K, n_speed, align, wps
     return fit, (fields, axes, land_arrs)
 
 
-def score_members(grids, cor, lat, wlon, seg_dt, *, wps, power_fn, align,
-                  hs_lim, tws_lim, p_lim=float("inf"), dep_off=0.0):
+def score_members(
+    grids,
+    cor,
+    lat,
+    wlon,
+    seg_dt,
+    *,
+    wps,
+    power_fn,
+    align,
+    hs_lim,
+    tws_lim,
+    p_lim=float("inf"),
+    dep_off=0.0,
+):
     """Per-member outcomes of a fixed route, sampled as the cost samples it.
 
     ``lat``, ``wlon``, ``seg_dt`` as returned by
@@ -321,8 +373,8 @@ def score_members(grids, cor, lat, wlon, seg_dt, *, wps, power_fn, align,
     v = jm._haversine_m(rlat[:-1], glon[:-1], rlat[1:], glon[1:]) / (seg * 3600.0)
     bearing = jm._bearing_deg(rlat[:-1], glon[:-1], rlat[1:], glon[1:])
     mid_lat = (rlat[:-1] + rlat[1:]) / 2
-    mid_lon = (glon[:-1] + glon[1:]) / 2
-    mid_lon_q = jnp.where(mid_lon < 0, mid_lon + 360.0, mid_lon) if grids.lon_wrap else mid_lon
+    glon_q = jnp.where(glon < 0, glon + 360.0, glon) if grids.lon_wrap else glon
+    mid_lon_q = (glon_q[:-1] + glon_q[1:]) / 2
     ti, tf = time_index(dep_off + jnp.cumsum(seg) - seg / 2, grids.steps)
 
     def one(u10m, v10m, swhm, msm, mcm):
@@ -333,23 +385,54 @@ def score_members(grids, cor, lat, wlon, seg_dt, *, wps, power_fn, align,
         ms = jm._interp(msm, grids.slat, grids.slon, mid_lat, mid_lon_q, ti, tf, nt)
         mc = jm._interp(mcm, grids.slat, grids.slon, mid_lat, mid_lon_q, ti, tf, nt)
         mwd = jnp.mod(jnp.degrees(jnp.arctan2(ms, mc)), 360.0)
-        tws = jnp.sqrt(u10 ** 2 + v10 ** 2)
+        tws = jnp.sqrt(u10**2 + v10**2)
         wind_from = jnp.mod(180.0 + jnp.degrees(jnp.arctan2(u10, v10)), 360.0)
-        p = power_fn(tws, jnp.mod(wind_from - bearing, 360.0), swh,
-                     jnp.mod(mwd - bearing, 360.0), v, wps)
-        return jnp.stack([jnp.sum(p * seg) / 1000.0, jnp.max(swh), jnp.max(tws), jnp.max(p),
-                          jnp.max(jnp.stack([swh / hs_lim, tws / tws_lim])) - 1.0,
-                          jnp.max(p) / p_lim - 1.0])
+        p = power_fn(
+            tws, jnp.mod(wind_from - bearing, 360.0), swh, jnp.mod(mwd - bearing, 360.0), v, wps
+        )
+        return jnp.stack(
+            [
+                jnp.sum(p * seg) / 1000.0,
+                jnp.max(swh),
+                jnp.max(tws),
+                jnp.max(p),
+                jnp.max(jnp.stack([swh / hs_lim, tws / tws_lim])) - 1.0,
+                jnp.max(p) / p_lim - 1.0,
+            ]
+        )
 
     out = jax.jit(jax.vmap(one))(grids.u10, grids.v10, grids.swh, grids.mwd_sin, grids.mwd_cos)
-    return dict(energy_mwh=np.asarray(out[:, 0]), max_hs=np.asarray(out[:, 1]),
-                max_tws=np.asarray(out[:, 2]), max_power=np.asarray(out[:, 3]),
-                margin=np.asarray(out[:, 4]), power_margin=np.asarray(out[:, 5]))
+    return dict(
+        energy_mwh=np.asarray(out[:, 0]),
+        max_hs=np.asarray(out[:, 1]),
+        max_tws=np.asarray(out[:, 2]),
+        max_power=np.asarray(out[:, 3]),
+        margin=np.asarray(out[:, 4]),
+        power_margin=np.asarray(out[:, 5]),
+    )
 
 
 @partial(jax.jit, static_argnames=("power_fn", "wps"))
-def _series_core(u10f, v10f, swhf, msf, mcf, wlat, wlon, slat, slon, steps,
-                 mid_lat, mid_lon_q, bearing, v, smid, *, power_fn, wps):
+def _series_core(
+    u10f,
+    v10f,
+    swhf,
+    msf,
+    mcf,
+    wlat,
+    wlon,
+    slat,
+    slon,
+    steps,
+    mid_lat,
+    mid_lon_q,
+    bearing,
+    v,
+    smid,
+    *,
+    power_fn,
+    wps,
+):
     ti, tf = time_index(smid, steps)
 
     def one(u10m, v10m, swhm, msm, mcm):
@@ -360,10 +443,11 @@ def _series_core(u10f, v10f, swhf, msf, mcf, wlat, wlon, slat, slon, steps,
         ms = jm._interp(msm, slat, slon, mid_lat, mid_lon_q, ti, tf, nt)
         mc = jm._interp(mcm, slat, slon, mid_lat, mid_lon_q, ti, tf, nt)
         mwd = jnp.mod(jnp.degrees(jnp.arctan2(ms, mc)), 360.0)
-        tws = jnp.sqrt(u10 ** 2 + v10 ** 2)
+        tws = jnp.sqrt(u10**2 + v10**2)
         wind_from = jnp.mod(180.0 + jnp.degrees(jnp.arctan2(u10, v10)), 360.0)
-        p = power_fn(tws, jnp.mod(wind_from - bearing, 360.0), swh,
-                     jnp.mod(mwd - bearing, 360.0), v, wps)
+        p = power_fn(
+            tws, jnp.mod(wind_from - bearing, 360.0), swh, jnp.mod(mwd - bearing, 360.0), v, wps
+        )
         return jnp.stack([p, swh, tws])
 
     return jax.vmap(one)(u10f, v10f, swhf, msf, mcf)
@@ -390,24 +474,47 @@ def member_series(grids, t_h, lat, lon, *, wps, power_fn, pad_to=512):
     n = len(t_h) - 1
     npad = -(-n // pad_to) * pad_to
     seg = t_h[1:] - t_h[:-1]
-    la0, lo0, la1, lo1 = (jnp.asarray(x, jnp.float32)
-                          for x in (lat[:-1], glon[:-1], lat[1:], glon[1:]))
+    la0, lo0, la1, lo1 = (
+        jnp.asarray(x, jnp.float32) for x in (lat[:-1], glon[:-1], lat[1:], glon[1:])
+    )
     dist = np.asarray(jm._haversine_m(la0, lo0, la1, lo1))
     bearing = np.asarray(jm._bearing_deg(la0, lo0, la1, lo1))
     v = dist / (np.maximum(seg, 1e-6) * 3600.0)
     mid_lat = (lat[:-1] + lat[1:]) / 2
-    mid_lon = (glon[:-1] + glon[1:]) / 2
-    mid_lon_q = np.where(mid_lon < 0, mid_lon + 360.0, mid_lon) if grids.lon_wrap else mid_lon
+    glon_q = np.where(glon < 0, glon + 360.0, glon) if grids.lon_wrap else glon
+    mid_lon_q = (glon_q[:-1] + glon_q[1:]) / 2
     smid = (t_h[:-1] + t_h[1:]) / 2
 
     def pad(x):
         return jnp.asarray(np.pad(x, (0, npad - n), mode="edge"), jnp.float32)
 
-    out = np.asarray(_series_core(
-        grids.u10, grids.v10, grids.swh, grids.mwd_sin, grids.mwd_cos,
-        grids.wlat, grids.wlon, grids.slat, grids.slon, grids.steps,
-        pad(mid_lat), pad(mid_lon_q), pad(bearing), pad(v), pad(smid),
-        power_fn=power_fn, wps=wps))[:, :, :n]
+    out = np.asarray(
+        _series_core(
+            grids.u10,
+            grids.v10,
+            grids.swh,
+            grids.mwd_sin,
+            grids.mwd_cos,
+            grids.wlat,
+            grids.wlon,
+            grids.slat,
+            grids.slon,
+            grids.steps,
+            pad(mid_lat),
+            pad(mid_lon_q),
+            pad(bearing),
+            pad(v),
+            pad(smid),
+            power_fn=power_fn,
+            wps=wps,
+        )
+    )[:, :, :n]
     steps = np.asarray(grids.steps)
-    return dict(power_kw=out[:, 0], swh=out[:, 1], tws=out[:, 2], seg_h=seg, t_mid_h=smid,
-                valid=(smid >= steps[0]) & (smid <= steps[-1]))
+    return dict(
+        power_kw=out[:, 0],
+        swh=out[:, 1],
+        tws=out[:, 2],
+        seg_h=seg,
+        t_mid_h=smid,
+        valid=(smid >= steps[0]) & (smid <= steps[-1]),
+    )
