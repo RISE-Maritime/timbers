@@ -245,8 +245,9 @@ def evaluate_route_full(
 # ---------------------------------------------------------------------------
 # Scoring under a shaft-power ceiling
 # ---------------------------------------------------------------------------
-def v_max_for_power(power_fn, tws, twa_deg, swh, mwa_deg, wps, p_max,
-                    v_hi: float = 20.0, steps: int = 40):
+def v_max_for_power(
+    power_fn, tws, twa_deg, swh, mwa_deg, wps, p_max, v_hi: float = 20.0, steps: int = 40
+):
     """Largest speed (m/s) whose demanded shaft power stays within ``p_max``.
 
     Requires power to be non-decreasing in speed for fixed weather, so that
@@ -265,6 +266,11 @@ def v_max_for_power(power_fn, tws, twa_deg, swh, mwa_deg, wps, p_max,
     return lo
 
 
+def _signed(lon):
+    """Longitude in [-180, 180)."""
+    return ((lon + 180.0) % 360.0) - 180.0
+
+
 def _path_arrays(lat, lon):
     """Cumulative along-track distance (m), leg lengths and leg bearings."""
     seg_m = _haversine_m(lat[:-1], lon[:-1], lat[1:], lon[1:])
@@ -280,9 +286,22 @@ def _at_distance(lat, lon, cum_m, d):
     return lat[i] + f * (lat[i + 1] - lat[i]), lon[i] + f * (lon[i + 1] - lon[i]), i
 
 
-def evaluate_route_saturated(wind_grid, wave_grid, dep, lat, lon, seg_dt_h,
-                             power_fn, *, wps=False, p_max=np.inf, dt_h=0.25,
-                             max_hours=None, t_offset_h=0.0, stall_factor=2.0):
+def evaluate_route_saturated(
+    wind_grid,
+    wave_grid,
+    dep,
+    lat,
+    lon,
+    seg_dt_h,
+    power_fn,
+    *,
+    wps=False,
+    p_max=np.inf,
+    dt_h=0.25,
+    max_hours=None,
+    t_offset_h=0.0,
+    stall_factor=2.0,
+):
     """Sail a planned route forward in time under a shaft-power ceiling.
 
     The ship follows the commanded speed of each leg (leg length over planned
@@ -303,7 +322,8 @@ def evaluate_route_saturated(wind_grid, wave_grid, dep, lat, lon, seg_dt_h,
         Departure time.
     lat, lon : array_like, length L
         Planned track, signed longitude (e.g. from ``optimizer.decode_route``
-        with ``optimizer.working_to_signed``).
+        with ``optimizer.working_to_signed``). The track may cross the
+        antimeridian; positions are interpolated in continuous longitude.
     seg_dt_h : array_like, length L-1
         Planned leg durations in hours; their sum is the scheduled passage time.
     power_fn : callable
@@ -328,9 +348,12 @@ def evaluate_route_saturated(wind_grid, wave_grid, dep, lat, lon, seg_dt_h,
         ``actual_hours``, ``delay_h``, ``arrived``, ``arrival`` (datetime),
         ``fraction_done``, ``end_lat``, ``end_lon``, ``saturated_frac`` (share
         of steps limited by the ceiling) and ``track`` (realised ``t_h``,
-        ``lat``, ``lon``).
+        ``lat``, ``lon``). ``actual_hours``, ``delay_h`` and ``track["t_h"]``
+        count from the start of this call, i.e. exclude ``t_offset_h``;
+        ``arrival`` includes it. Longitudes are signed.
     """
-    lat, lon = np.asarray(lat, float), np.asarray(lon, float)
+    lat = np.asarray(lat, float)
+    lon = np.unwrap(np.asarray(lon, float), period=360.0)  # continuous across 180
     seg_dt_h = np.asarray(seg_dt_h, float)
     cum_m, seg_m, brg = _path_arrays(lat, lon)
     total_m = cum_m[-1]
@@ -339,12 +362,14 @@ def evaluate_route_saturated(wind_grid, wave_grid, dep, lat, lon, seg_dt_h,
 
     glon = wind_grid["lon"]
     wrap = glon[0] >= 0 and glon[-1] > 180
-    dep_off = float((np.datetime64(dep.replace(tzinfo=None), "s") - wind_grid["t0"])
-                    / np.timedelta64(1, "h"))
+    dep_off = float(
+        (np.datetime64(dep.replace(tzinfo=None), "s") - wind_grid["t0"]) / np.timedelta64(1, "h")
+    )
     limit_h = np.inf if max_hours is None else float(max_hours)
 
     def sample(dist, hours):
         p_lat, p_lon, leg = _at_distance(lat, lon, cum_m, min(dist, total_m))
+        p_lon = _signed(p_lon)
         q_lon = p_lon + 360.0 if (wrap and p_lon < 0) else p_lon
         h = dep_off + t_offset_h + hours
         u = float(query(wind_grid, "u10", [p_lat], [q_lon], [h])[0])
@@ -353,8 +378,13 @@ def evaluate_route_saturated(wind_grid, wave_grid, dep, lat, lon, seg_dt_h,
         mwd = float(query_angle(wave_grid, "mwd", [p_lat], [q_lon], [h])[0])
         tws = float(np.hypot(u, v))
         wind_from = np.mod(180.0 + np.degrees(np.arctan2(u, v)), 360.0)
-        return (tws, float(np.mod(wind_from - brg[leg], 360.0)), hs,
-                float(np.mod(mwd - brg[leg], 360.0)), leg)
+        return (
+            tws,
+            float(np.mod(wind_from - brg[leg], 360.0)),
+            hs,
+            float(np.mod(mwd - brg[leg], 360.0)),
+            leg,
+        )
 
     def speed(tws, twa, hs, mwa, leg):
         v_cmd = v_cmd_leg[leg]
@@ -366,7 +396,7 @@ def evaluate_route_saturated(wind_grid, wave_grid, dep, lat, lon, seg_dt_h,
     d = t_h = energy_kwh = 0.0
     n_sat = n_step = 0
     max_hs = max_tws = max_p = 0.0
-    trk_t, trk_lat, trk_lon = [0.0], [lat[0]], [lon[0]]
+    trk_t, trk_lat, trk_lon = [0.0], [lat[0]], [_signed(lon[0])]
     while d < total_m and t_h < min(limit_h, stall_factor * planned_h):
         tws0, twa0, hs0, mwa0, leg0 = sample(d, t_h)
         v0, _ = speed(tws0, twa0, hs0, mwa0, leg0)
@@ -374,26 +404,33 @@ def evaluate_route_saturated(wind_grid, wave_grid, dep, lat, lon, seg_dt_h,
         tws, twa, hs, mwa, leg = sample(d + v0 * (step_h / 2) * 3600.0, t_h + step_h / 2)
         v_act, sat = speed(tws, twa, hs, mwa, leg)
         p_kw = float(power_fn(tws, twa, hs, mwa, v_act, wps))
-        step_h = min(step_h, (total_m - d) / max(v_act * 3600.0, 1e-9),
-                     max(limit_h - t_h, 1e-9))
+        step_h = min(step_h, (total_m - d) / max(v_act * 3600.0, 1e-9), max(limit_h - t_h, 1e-9))
         energy_kwh += p_kw * step_h
         d += v_act * step_h * 3600.0
         t_h += step_h
-        n_sat += int(sat); n_step += 1
+        n_sat += int(sat)
+        n_step += 1
         max_hs, max_tws, max_p = max(max_hs, hs), max(max_tws, tws), max(max_p, p_kw)
         a, b, _ = _at_distance(lat, lon, cum_m, min(d, total_m))
-        trk_t.append(t_h); trk_lat.append(a); trk_lon.append(b)
+        trk_t.append(t_h)
+        trk_lat.append(a)
+        trk_lon.append(_signed(b))
 
     end_lat, end_lon, _ = _at_distance(lat, lon, cum_m, min(d, total_m))
     return dict(
         energy_mwh=energy_kwh / 1000.0,
-        max_hs_m=max_hs, max_wind_mps=max_tws, max_power_kw=max_p,
+        max_hs_m=max_hs,
+        max_wind_mps=max_tws,
+        max_power_kw=max_p,
         sailed_distance_nm=float(total_m / 1852.0),
-        planned_hours=planned_h, actual_hours=float(t_h),
-        delay_h=float(t_h - planned_h), arrived=bool(d >= total_m - 1.0),
-        arrival=dep + timedelta(hours=float(t_h)),
+        planned_hours=planned_h,
+        actual_hours=float(t_h),
+        delay_h=float(t_h - planned_h),
+        arrived=bool(d >= total_m - 1.0),
+        arrival=dep + timedelta(hours=float(t_offset_h + t_h)),
         fraction_done=float(min(d / max(total_m, 1e-9), 1.0)),
-        end_lat=float(end_lat), end_lon=float(end_lon),
+        end_lat=float(end_lat),
+        end_lon=float(_signed(end_lon)),
         saturated_frac=float(n_sat / max(n_step, 1)),
         track=dict(t_h=trk_t, lat=trk_lat, lon=trk_lon),
     )
