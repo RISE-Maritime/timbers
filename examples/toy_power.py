@@ -19,11 +19,11 @@ import numpy as np
 def _toy(xp, tws, twa_deg, swh, mwa_deg, v, wps):
     twa = xp.radians(twa_deg)
     mwa = xp.radians(mwa_deg)
-    p_hull = 5.0 * v ** 3                              # cubic hull drag
-    p_wind = 2.0 * tws * (1.0 - xp.cos(twa))          # headwind costs most
-    p_wave = 8.0 * swh ** 2 * v * (1.0 + 0.5 * xp.cos(mwa))  # head seas worst
+    p_hull = 5.0 * v**3  # cubic hull drag
+    p_wind = 2.0 * tws * (1.0 - xp.cos(twa))  # headwind costs most
+    p_wave = 8.0 * swh**2 * v * (1.0 + 0.5 * xp.cos(mwa))  # head seas worst
     p = p_hull + p_wind + p_wave
-    if wps:                                            # crude beam-wind sail credit
+    if wps:  # crude beam-wind sail credit
         p = p - 1.5 * tws * v * xp.abs(xp.sin(twa))
     return xp.maximum(p, 0.0)
 

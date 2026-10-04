@@ -118,8 +118,7 @@ def load_era5(paths: list[str] | str) -> dict:
         names = [
             v
             for v in ds.variables
-            if v not in _SKIP_VARS
-            and ds.variables[v].dimensions[-2:] == ("latitude", "longitude")
+            if v not in _SKIP_VARS and ds.variables[v].dimensions[-2:] == ("latitude", "longitude")
         ]
         if var_names is None:
             var_names = names

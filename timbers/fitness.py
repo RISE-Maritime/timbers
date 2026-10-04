@@ -31,9 +31,22 @@ def build_fit(cor, grids, land, pen, K, NSP, L, ALIGN, wps, power_fn):
         ctrl = jnp.concatenate([o_n[None, :], interior, d_n[None, :]], axis=0)
         pts = op.bezier(ctrl, r)
         seg_dt = op.time_alloc(theta[ngeo:], cor.hours, L, NSP)
-        cost, *_ = op._route_cost(fld, ax, lnd, cor, *dargs,
-                                  pts[:, 0], pts[:, 1], seg_dt, dep_off, L, wps, pen,
-                                  power_fn, ALIGN)
+        cost, *_ = op._route_cost(
+            fld,
+            ax,
+            lnd,
+            cor,
+            *dargs,
+            pts[:, 0],
+            pts[:, 1],
+            seg_dt,
+            dep_off,
+            L,
+            wps,
+            pen,
+            power_fn,
+            ALIGN,
+        )
         return cost
 
     def fit(X, cargs):
