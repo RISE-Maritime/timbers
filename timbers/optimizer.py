@@ -206,7 +206,10 @@ def _route_cost(
         over_p = jnp.maximum(p / pen.p_soft - 1.0, 0.0)
         p_env = p_env + jnp.sum(jnp.exp(pen.aP * over_p) - 1.0)
 
-    p_land = jnp.sum(_sample_mask(lmask, llat, lwlon, lat, wlon))
+    # The end points are the fixed ports, identical for every candidate. A port
+    # touching the raster would add a constant lambda_land offset that, in
+    # float32, rounds away small energy differences, so they are left out.
+    p_land = jnp.sum(_sample_mask(lmask, llat, lwlon, lat[1:-1], wlon[1:-1]))
 
     cost = energy + pen.lambda_env * p_env + pen.lambda_land * p_land
     return cost, energy, p_env, p_land

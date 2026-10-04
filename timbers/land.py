@@ -78,8 +78,9 @@ def build_mask(
 INLAND_RAMP_PER_DEG = 1.0
 
 
-def exclusion_raster(land: dict, *, extra=None, domain=None,
-                     ramp: float = INLAND_RAMP_PER_DEG) -> dict:
+def exclusion_raster(
+    land: dict, *, extra=None, domain=None, ramp: float = INLAND_RAMP_PER_DEG
+) -> dict:
     """Combine static exclusions into one raster with no flat interior.
 
     ``land`` is a raster from :func:`build_mask`. ``extra`` is an optional
@@ -98,7 +99,8 @@ def exclusion_raster(land: dict, *, extra=None, domain=None,
     """
     from scipy.ndimage import distance_transform_edt
 
-    lat = np.asarray(land["lat"]); wlon = np.asarray(land["wlon"])
+    lat = np.asarray(land["lat"])
+    wlon = np.asarray(land["wlon"])
     m = (np.asarray(land["mask"]) > 0).astype(np.float32)
     if extra is not None:
         extra = np.asarray(extra, bool)
@@ -107,13 +109,11 @@ def exclusion_raster(land: dict, *, extra=None, domain=None,
         m = np.maximum(m, extra.astype(np.float32))
     if domain is not None:
         la0, la1, wl0, wl1 = domain
-        outside = (((lat < la0) | (lat > la1))[:, None]
-                   | ((wlon < wl0) | (wlon > wl1))[None, :])
+        outside = ((lat < la0) | (lat > la1))[:, None] | ((wlon < wl0) | (wlon > wl1))[None, :]
         m = np.maximum(m, outside.astype(np.float32))
     if m.all():
         raise ValueError("every cell is excluded")
     if ramp:
-        d = distance_transform_edt(m > 0, sampling=(abs(lat[1] - lat[0]),
-                                                    abs(wlon[1] - wlon[0])))
+        d = distance_transform_edt(m > 0, sampling=(abs(lat[1] - lat[0]), abs(wlon[1] - wlon[0])))
         m = m + ramp * d.astype(np.float32)
     return {"lat": lat, "wlon": wlon, "mask": m}

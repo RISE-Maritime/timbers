@@ -88,7 +88,7 @@ def load_era5(paths: list[str] | str, land_fill: str = "nearest") -> dict:
         File paths. They are sorted by their first timestamp and concatenated
         along the time axis. All files must share the same lat/lon grid.
     land_fill : {"nearest", "zero"}
-        How land-masked cells (ERA5 waves) are filled. ``"nearest"`` (default)
+        How land-masked cells (ERA5 waves; masked or NaN) are filled. ``"nearest"`` (default)
         carries the nearest sea cell's value inland, so land does not read as
         flat calm; see :mod:`timbers.seafill`. ``"zero"`` fills them with
         0.0.
@@ -134,8 +134,9 @@ def load_era5(paths: list[str] | str, land_fill: str = "nearest") -> dict:
         data = {}
         for v in var_names:
             raw = ds.variables[v][:]
-            masked = np.ma.getmaskarray(raw)
-            arr = np.ma.filled(raw, 0.0).astype(np.float32)
+            # NaN counts as masked: files without a NaN _FillValue store land as NaN.
+            masked = np.ma.getmaskarray(raw) | ~np.isfinite(np.ma.getdata(raw))
+            arr = np.where(masked, 0.0, np.ma.getdata(raw)).astype(np.float32)
             if land_fill == "nearest" and masked.any():
                 arr = fill_from_nearest_sea(arr, masked)
             data[v] = arr

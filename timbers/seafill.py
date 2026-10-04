@@ -44,8 +44,7 @@ def fill_from_nearest_sea(a: np.ndarray, masked: np.ndarray) -> np.ndarray:
     masked = np.asarray(masked, bool)
     if masked.shape[-2:] != a.shape[-2:]:
         raise ValueError(f"mask {masked.shape} does not match grid {a.shape[-2:]}")
-    grid = (masked.reshape(-1, *masked.shape[-2:]).any(axis=0)
-            if masked.ndim > 2 else masked)
+    grid = masked.reshape(-1, *masked.shape[-2:]).any(axis=0) if masked.ndim > 2 else masked
     if not grid.any():
         return a
     yi, xi = nearest_sea_index(grid)

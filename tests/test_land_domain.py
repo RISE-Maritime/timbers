@@ -40,7 +40,7 @@ def test_ramp_is_zero_at_sea_and_rises_inland():
     assert np.all(m[mask == 0] == 0.0)
     assert m[20, 3] == pytest.approx(1.1)
     assert m[22, 5] == pytest.approx(1.3)
-    assert np.all(np.diff(m[22, 3:6]) > 0)      # no flat interior
+    assert np.all(np.diff(m[22, 3:6]) > 0)  # no flat interior
 
 
 def test_ramp_zero_gives_the_binary_union():
@@ -98,7 +98,7 @@ def test_fill_no_op_and_all_masked():
         fill_from_nearest_sea(a, np.ones((2, 3), bool))
 
 
-def _write_wave_file(path):
+def _write_wave_file(path, nan_land=False):
     ds = nc.Dataset(path, "w")
     ds.createDimension("valid_time", 2)
     ds.createDimension("latitude", 3)
@@ -108,23 +108,29 @@ def _write_wave_file(path):
     t[:] = [0.0, 1.0]
     ds.createVariable("latitude", "f8", ("latitude",))[:] = [45.0, 44.5, 44.0]
     ds.createVariable("longitude", "f8", ("longitude",))[:] = [0.0, 0.5, 1.0]
-    v = ds.createVariable("swh", "f4", ("valid_time", "latitude", "longitude"),
-                          fill_value=-9999.0)
-    data = np.ma.masked_array(np.full((2, 3, 3), 2.0, np.float32))
-    data[:, 1, 1] = np.ma.masked                     # one land cell
+    dims = ("valid_time", "latitude", "longitude")
+    if nan_land:  # no _FillValue; land stored as NaN
+        v = ds.createVariable("swh", "f4", dims, fill_value=False)
+        data = np.full((2, 3, 3), 2.0, np.float32)
+        data[:, 1, 1] = np.nan
+    else:
+        v = ds.createVariable("swh", "f4", dims, fill_value=-9999.0)
+        data = np.ma.masked_array(np.full((2, 3, 3), 2.0, np.float32))
+        data[:, 1, 1] = np.ma.masked  # one land cell
     v[:] = data
     ds.close()
 
 
-def test_load_era5_does_not_make_land_calm(tmp_path):
+@pytest.mark.parametrize("nan_land", [False, True])
+def test_load_era5_does_not_make_land_calm(tmp_path, nan_land):
     f = tmp_path / "waves.nc"
-    _write_wave_file(f)
+    _write_wave_file(f, nan_land)
     near = load_era5(str(f))
     zero = load_era5(str(f), land_fill="zero")
     iy = int(np.argmin(np.abs(near["lat"] - 44.5)))
     ix = int(np.argmin(np.abs(near["lon"] - 0.5)))
-    assert np.all(near["swh"][:, iy, ix] == 2.0)    # carried from the sea
-    assert np.all(zero["swh"][:, iy, ix] == 0.0)    # zero fill
+    assert np.all(near["swh"][:, iy, ix] == 2.0)  # carried from the sea
+    assert np.all(zero["swh"][:, iy, ix] == 0.0)  # zero fill
 
 
 # --- hard land in the cost ------------------------------------------------------
@@ -140,13 +146,18 @@ def _grids():
     shape = (nt, lat.size, lon.size)
     base = dict(lat=lat, lon=lon, times=t, t0=t[0], dt_h=1.0)
     wind = {**base, "u10": np.full(shape, 5.0, np.float32), "v10": np.full(shape, -4.0, np.float32)}
-    wave = {**base, "swh": np.full(shape, 1.5, np.float32), "mwd": np.full(shape, 200.0, np.float32)}
+    wave = {
+        **base,
+        "swh": np.full(shape, 1.5, np.float32),
+        "mwd": np.full(shape, 200.0, np.float32),
+    }
     return jm.DeviceGrids(wind, wave)
 
 
 def _cost(land, theta):
-    fn = op.make_batched_cost(_grids(), op.DeviceLand(land), COR, L, False, op.Penalty(),
-                              K, toy_power_jax, n_speed=NSP)
+    fn = op.make_batched_cost(
+        _grids(), op.DeviceLand(land), COR, L, False, op.Penalty(), K, toy_power_jax, n_speed=NSP
+    )
     return float(fn(jnp.asarray(theta)[None, :], jnp.float32(0.0))[0])
 
 
@@ -159,10 +170,45 @@ def test_land_is_hard_and_free_at_sea():
     island = np.zeros((llat.size, lwlon.size))
     lat_gc, wlon_gc, _ = op.decode_route(op.gc_init_theta(COR, K, NSP), COR, K, L, NSP)
     mid = L // 2
-    iy = np.abs(llat - lat_gc[mid]).argmin(); ix = np.abs(lwlon - wlon_gc[mid]).argmin()
-    island[iy - 4:iy + 5, ix - 4:ix + 5] = 1.0
+    iy = np.abs(llat - lat_gc[mid]).argmin()
+    ix = np.abs(lwlon - wlon_gc[mid]).argmin()
+    island[iy - 4 : iy + 5, ix - 4 : ix + 5] = 1.0
     land = exclusion_raster({"lat": llat, "wlon": lwlon, "mask": island})
     theta = op.gc_init_theta(COR, K, NSP)
     c_sea, c_land = _cost(sea, theta), _cost(land, theta)
     assert c_land - c_sea > 1e5
     assert _cost(exclusion_raster(sea), theta) == pytest.approx(c_sea)
+
+
+def test_port_on_land_keeps_cost_resolution():
+    """A port inside the raster adds nothing: candidates that differ only in
+    speed profile keep the costs, and so the ranking, they have without land."""
+    llat = np.arange(35.0, 50.001, 0.25)
+    lwlon = np.arange(-75.0, 5.001, 0.25)
+    coast = np.zeros((llat.size, lwlon.size))
+    iy = np.abs(llat - COR.o_lat).argmin()
+    ix = np.abs(lwlon - COR.o_wlon).argmin()
+    coast[iy - 2 : iy + 3, ix - 2 : ix + 3] = 1.0
+    land = exclusion_raster({"lat": llat, "wlon": lwlon, "mask": coast})
+    sea = {"lat": llat, "wlon": lwlon, "mask": np.zeros_like(coast, np.float32)}
+    rng = np.random.default_rng(0)
+    theta = np.tile(op.gc_init_theta(COR, K, NSP), (64, 1)).astype(np.float32)
+    theta[:, -NSP:] = rng.normal(0.0, 0.02, (64, NSP))
+
+    def costs(raster):
+        fn = op.make_batched_cost(
+            _grids(),
+            op.DeviceLand(raster),
+            COR,
+            L,
+            False,
+            op.Penalty(),
+            K,
+            toy_power_jax,
+            n_speed=NSP,
+        )
+        return np.asarray(fn(jnp.asarray(theta), jnp.float32(0.0)))
+
+    on_land, free = costs(land), costs(sea)
+    assert len(np.unique(free)) == 64
+    np.testing.assert_array_equal(on_land, free)
