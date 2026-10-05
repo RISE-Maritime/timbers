@@ -44,12 +44,12 @@ pressure from the hard constraint.
 **D. Best-of-N seed restarts.** The energy landscape is multimodal
 (north-of-storm vs south-of-storm vs GC-hugging basins); N restarts cut
 per-departure variance. Restarts buy more than iterations: on a 354 h passage
-the best of 8 to 16 restarts varies by mostly 0.1 to 1.3% of the passage
-energy, and 900 iterations instead of 300 change the best of 24 by 0.3%. How
+the best of 8 to 16 restarts varies by 0.1 to 1.3% of the passage energy in
+most cases, and 900 iterations instead of 300 change the best of 24 by 0.3%. How
 reliably a restart converges depends on the objective. On a winter departure,
 the median of 24 restarts was 1.31 and 1.13 times the best for the two
 objectives in `timbers.ensemble` whose safety term reads only the nominal member
-(`deterministic`, `expected_value`), against 1.01 to 1.02 for the
+(`deterministic` and `expected_value` respectively), against 1.01 to 1.02 for the
 ensemble-safety objectives; on a summer departure all were within 1.01.
 When comparing formulations, use a budget at which all of them converge, or
 report the restart spread with the result.
@@ -70,8 +70,9 @@ a fixed resolution does not reach.
 *Resolution for long passages.* The table is a grid sweep on a 354 h, 2,830 nm
 North Atlantic crossing by a wind-assisted ship, planned once on reanalysis
 weather (so differences come from the grid and the search, not from forecast
-error), best of 8 restarts. The reference is the same voyage re-planned daily
-on the same weather (the check below), which chains fifteen curves.
+error), on one winter departure, best of 8 restarts. The reference is the same
+voyage re-planned daily on the same weather (the check below), which chains
+fifteen curves.
 
 | `K` | `L` | `n_speed` | vs reference | restart s.d. |
 |---:|---:|---:|---:|---:|
@@ -79,20 +80,29 @@ on the same weather (the check below), which chains fifteen curves.
 | 10 | 60 | 8 | +4.3% | 5.8 MWh |
 | 20 | 100 | 8 | +2.1% | 4.9 MWh |
 | 20 | 100 | 32 | +0.9% | 0.8 MWh |
+| 28 | 140 | 32 | +1.0% | 1.7 MWh |
 | 40 | 200 | 32 | +0.9% | 6.2 MWh |
+| 28 | 140 | 64 | +1.8% | 3.0 MWh |
 | 40 | 200 | 64 | +2.0% | 4.1 MWh |
 | 56 | 280 | 64 | +4.3% | 10.3 MWh |
 
 Geometry comes first: 6 to 20 control points remove most of the excess, and
 from 20 to 40 the energy varies by 0.1%. Beyond about 40 the solve degrades and
 the restart spread grows, as expected for high-degree Bézier curves. Speed
-comes second: 8 to 32 weights at `K = 20` remove another 1.2 points, and 32 to
-64 narrows the gap to the re-planned voyage by a further 0.4 to 1.8 points on
-three of four departures, while 128 changes nothing. Per unit of passage, a
-starting point for multi-day voyages is one control point per about 150 nm,
-one evaluation point per about 30 nm and one speed weight per 5 to 11 h
-(`K = 20`, `L = 100`, `n_speed = 32` to `64` here), with `K` kept below about
-40. These figures come from one ship and one corridor; check them on yours.
+comes second: 8 to 32 weights at `K = 20` remove another 1.2 points. The table
+does not settle 32 against 64 weights: at `K = 28` and `40`, 64 weights read
+about one point (2 to 3 MWh) worse, a difference no larger than the
+disagreement between restarts there (s.d. 1.7 to 6.2 MWh), from one departure
+and 8 restarts. A separate check at `K = 20`,
+`L = 100`, on four winter departures with 24 restarts each, measured the gap
+to the re-planned voyage: 32 to 64 weights narrowed it by 0.4, 0.4 and 1.8
+points on three departures and widened it by 0.1 on the fourth, and 128
+brought no further gain. Per unit of passage, a starting point for multi-day
+voyages is one control point per about 150 nm, one evaluation point per about
+30 nm and one speed weight per 5 to 11 h (`K = 20`, `L = 100`, `n_speed = 32`
+to `64` here), with `K` kept below about 40 and enough restarts for the
+dimension chosen. These figures come from one ship and one corridor; check
+them on yours.
 
 *Checking a grid.* Solve one departure twice on the verifying weather: planned
 once, and re-planned every cycle with the verifying field as the forecast. With
