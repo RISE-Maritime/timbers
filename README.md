@@ -49,6 +49,14 @@ out to be the first-order energy lever; global geometry is not.
    `score_members` gives per-member outcomes of a fixed route (its fragility,
    under the surrogate) and `member_series` per-segment values along a timed
    track.
+6. **Re-planning** (`timbers.replan`). `sail_with_replanning` plans, sails one
+   forecast cycle on the verifying weather under the power ceiling, and plans
+   again from the realised position with the next forecast, keeping the
+   original arrival time. The forecast is any callable returning a
+   `model.Grids`, so archived ensembles, a single forecast and the verifying
+   field itself (hindsight) all fit. `optimizer.fit_theta_to_track` projects a
+   timed track onto the Bezier family, to seed the optimizer or to measure
+   whether one curve can represent it.
 
 Details, design rationale, and negative results: [docs/method.md](docs/method.md).
 
@@ -62,12 +70,13 @@ In the order data flows through a solve:
 | `timbers.land` | `build_mask` rasterizes Natural Earth land over a corridor; `exclusion_raster` adds shallow water, a domain box and an inland ramp. |
 | `timbers.geo` | Spherical geometry shared by NumPy and JAX: `haversine_m`, `bearing_deg`, `midpoint_lon`, `to_grid_lon` (correct across 0° and 180°). |
 | `timbers.model` | The device core. `Grids` holds fields as `(member, time, lat, lon)` (`Grids.from_era5` for a single field); `sample` gives power, Hs and TWS per member and segment, optionally under a forecast-error perturbation. Every device cost and scorer is a reduction over it. |
-| `timbers.optimizer` | Route parameterization (`Corridor`, `bezier`, `time_alloc`, `theta_to_track`, `decode_route`), the penalized cost (`Penalty`, `DeviceLand`) and `build_fit`, the batched cost for the solver. |
+| `timbers.optimizer` | Route parameterization (`Corridor`, `bezier`, `time_alloc`, `theta_to_track`, `decode_route`, and its inverse `fit_theta_to_track`), the penalized cost (`Penalty`, `DeviceLand`) and `build_fit`, the batched cost for the solver. |
 | `timbers.ensemble` | Uncertainty-aware objectives: `make_ensemble_cost` (four objectives; safety modes `prob`, `cvar`, `mean`), `score_members`, `member_series` and `perturbation_grid` for the forecast-error surrogate. |
 | `timbers.cmaes` | GPU-native separable CMA-ES (`run`, `make_solver`); the fitness is injected. |
 | `timbers.polish` | Stage 2: `make_polisher`, gradient refinement of a converged route. |
 | `timbers.solve` | `solve_corridor`: every departure × seed in one chunked GPU dispatch, then exact scoring, selection and optional polish. |
 | `timbers.scoring` | The NumPy reference scorer: `evaluate_route` / `evaluate_route_full` on the planned schedule, `evaluate_route_saturated` under a shaft-power ceiling, `v_max_for_power`. |
+| `timbers.replan` | `sail_with_replanning`: plan, sail one forecast cycle on the verifying weather, re-plan from the realised position with the next forecast. |
 
 ## Install
 
