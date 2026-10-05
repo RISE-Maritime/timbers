@@ -49,6 +49,14 @@ out to be the first-order energy lever; global geometry is not.
    `score_members` gives per-member outcomes of a fixed route (its fragility,
    under the surrogate) and `member_series` per-segment values along a timed
    track.
+6. **Re-planning** (`timbers.replan`). `sail_with_replanning` plans, sails one
+   forecast cycle on the verifying weather under the power ceiling, and plans
+   again from the realised position with the next forecast, keeping the
+   original arrival time. The forecast is any callable returning a
+   `model.Grids`, so archived ensembles, a single forecast and the verifying
+   field itself (hindsight) all fit. `optimizer.fit_theta_to_track` projects a
+   timed track onto the Bezier family, to seed the optimizer or to measure
+   whether one curve can represent it.
 
 Details, design rationale, and negative results: [docs/method.md](docs/method.md).
 
