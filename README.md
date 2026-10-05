@@ -129,6 +129,10 @@ backend, all on synthetic grids with the toy power model.
   outcome rather than an input. `max_hours` and `t_offset_h` let a voyage be
   sailed in pieces, for example between re-plans. `v_max_for_power` gives the
   largest speed within the ceiling for given weather.
+- **Resolution**: `K`, `L` and `n_speed` set how finely the route and its speed
+  profile are resolved. For multi-day passages, see
+  [docs/method.md](docs/method.md) § F for measured starting values and a check
+  of whether a grid is fine enough.
 - **Corridor**: an `optimizer.Corridor` (port endpoints in a continuous
   working-longitude frame + passage time) and an optional land mask from
   `timbers.land.build_mask`. Pass the mask through
