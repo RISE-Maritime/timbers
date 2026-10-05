@@ -8,7 +8,8 @@ profile: ``n_speed`` log-weights are interpolated to the L-1 segments and
 exp-normalized into per-segment durations summing to the fixed passage time
 (``time_alloc``). ``n_speed=0`` recovers the implicit uniform-speed model of
 the BERS reference method (arXiv 2605.31533), of which this is an extension.
-The batched penalized cost is evaluated for the whole population on the GPU.
+The batched penalized cost (:func:`build_fit`) is evaluated for the whole
+population on the GPU, on the sampling core of :mod:`timbers.model`.
 
 Cost:  J = energy_MWh + lambda_env * P_env + lambda_land * P_land
   P_env  = sum_seg [exp(aH*[Hs-hs_soft]+) + exp(aU*[TWS-us_soft]+) - 2]
@@ -24,7 +25,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from . import model as jm
-from .geo import midpoint_lon
+from .geo import to_grid_lon
 
 jax.config.update("jax_enable_x64", False)
 
@@ -57,7 +58,8 @@ class Corridor:
 
 
 def working_to_signed(wlon):
-    return ((wlon + 180.0) % 360.0) - 180.0
+    """Working longitude to signed longitude in [-180, 180)."""
+    return to_grid_lon(wlon, False)
 
 
 # ---------------------------------------------------------------------------
@@ -74,21 +76,35 @@ def bezier(ctrl, r):
 
 
 # ---------------------------------------------------------------------------
-# Land sampling (bilinear from raster)
+# Land
 # ---------------------------------------------------------------------------
 class DeviceLand:
+    """An exclusion raster (see :func:`timbers.land.exclusion_raster`) on the device."""
+
     def __init__(self, land: dict):
         self.lat = jnp.asarray(land["lat"], jnp.float32)
         self.wlon = jnp.asarray(land["wlon"], jnp.float32)
-        self.mask = jnp.asarray(land["mask"], jnp.float32)  # (Y,X), 1=land
+        self.mask = jnp.asarray(land["mask"], jnp.float32)  # (Y,X), 0 at sea
 
-    def sample(self, lat, wlon):
-        yi, yf = jm._frac(self.lat, lat)
-        xi, xf = jm._frac(self.wlon, wlon)
-        m = self.mask
-        c0 = m[yi, xi] * (1 - xf) + m[yi, xi + 1] * xf
-        c1 = m[yi + 1, xi] * (1 - xf) + m[yi + 1, xi + 1] * xf
-        return c0 * (1 - yf) + c1 * yf
+    @property
+    def arrays(self):
+        return (self.mask, self.lat, self.wlon)
+
+
+def land_term(land_arrs, lat, wlon):
+    """Summed exclusion raster along a track, bilinearly sampled.
+
+    The end points are the fixed ports, identical for every candidate, so they
+    are left out: a port touching the raster would add a constant that, at a
+    hard-constraint weight in float32, rounds away small energy differences.
+    """
+    mask, lat_ax, wlon_ax = land_arrs
+    lat, wlon = lat[1:-1], wlon[1:-1]
+    yi, yf = jm._frac(lat_ax, lat)
+    xi, xf = jm._frac(wlon_ax, wlon)
+    c0 = mask[yi, xi] * (1 - xf) + mask[yi, xi + 1] * xf
+    c1 = mask[yi + 1, xi] * (1 - xf) + mask[yi + 1, xi + 1] * xf
+    return jnp.sum(c0 * (1 - yf) + c1 * yf)
 
 
 # ---------------------------------------------------------------------------
@@ -129,73 +145,31 @@ def _route_cost(
     axes,
     land_arrs,
     cor,
-    dt_h,
-    nt,
-    lon_wrap,
-    nlat,
-    nwlon,
+    lat,
+    wlon,
     seg_dt,
     dep_off,
-    L,
     wps,
     pen: Penalty,
     power_fn,
-    align_dt_h=0.0,
+    align: float,
+    lon_wrap: bool,
 ):
-    """Penalized cost for one route given normalized waypoint coords (L,).
+    """Penalized cost of one track: ``(cost, energy, p_env, p_land)``.
 
-    ``seg_dt`` is the (L-1,) array of per-segment durations (hours); uniform for
-    the implicit-speed model, or a learned allocation for the explicit-speed
-    model (always summing to the fixed passage time).
-
-    ``align_dt_h`` > 0 makes the cost match the scorer: the L-point track is
-    linearly resampled to a uniform time grid of that step (e.g. 0.25 h) and the
-    energy/Hs are integrated there. This optimizes the scored quantity and lets
-    the Hs penalty see the sub-segment peaks the scorer sees (so we can ride Hs
-    up to 7 safely). With 0, the cost integrates on the native L segments.
-
-    ``fields`` and ``axes`` are passed as traced arguments (NOT closures) so XLA
-    treats the large grid arrays as parameters rather than baking them into the
-    HLO as host-resident constants.
+    ``lat``, ``wlon`` (working longitude) and ``seg_dt`` (hours) describe the
+    track, as from :func:`theta_to_track`. ``align`` > 0 makes the cost match the
+    scorer: the track is resampled to a uniform time grid of that step (e.g.
+    0.25 h) and energy and Hs are integrated there, so the optimized quantity is
+    the scored one and the Hs penalty sees the sub-segment peaks the scorer
+    sees. With 0, the cost integrates on the native segments. Only the first
+    member of the grids is read.
     """
-    u10f, v10f, swhf, msf, mcf = fields
-    wlat, wlon_ax, slat, slon = axes
-    lmask, llat, lwlon = land_arrs
-
-    lat, wlon = cor.denorm(nlat, nwlon)
-    if align_dt_h > 0.0:
-        # Replicate the scorer: linearly resample the track to uniform time.
-        t_cum = jnp.concatenate([jnp.zeros(1, lat.dtype), jnp.cumsum(seg_dt)])
-        M = int(round(cor.hours / align_dt_h))
-        tau = jnp.linspace(0.0, cor.hours, M + 1).astype(lat.dtype)
-        lat = jnp.interp(tau, t_cum, lat)
-        wlon = jnp.interp(tau, t_cum, wlon)
-        seg_dt = jnp.full((M,), cor.hours / M, lat.dtype)
-    glon = working_to_signed(wlon)  # signed lon for weather
-
-    mid_lat = (lat[:-1] + lat[1:]) / 2
-    mid_lon = midpoint_lon(glon[:-1], glon[1:], lon_wrap)
-    cum = jnp.cumsum(seg_dt)
-    seg_mid_h = dep_off + cum - seg_dt / 2
-    ti, tf = jm._time_index(seg_mid_h, dt_h, nt)
-
-    u10 = jm._interp(u10f, wlat, wlon_ax, mid_lat, mid_lon, ti, tf, nt)
-    v10 = jm._interp(v10f, wlat, wlon_ax, mid_lat, mid_lon, ti, tf, nt)
-    swh = jm._interp(swhf, slat, slon, mid_lat, mid_lon, ti, tf, nt)
-    ms = jm._interp(msf, slat, slon, mid_lat, mid_lon, ti, tf, nt)
-    mc = jm._interp(mcf, slat, slon, mid_lat, mid_lon, ti, tf, nt)
-    mwd = jnp.mod(jnp.degrees(jnp.arctan2(ms, mc)), 360.0)
-
-    dist = jm._haversine_m(lat[:-1], glon[:-1], lat[1:], glon[1:])
-    v = dist / (seg_dt * 3600.0)
-    bearing = jm._bearing_deg(lat[:-1], glon[:-1], lat[1:], glon[1:])
-
-    tws = jnp.sqrt(u10**2 + v10**2)
-    wind_from = jnp.mod(180.0 + jnp.degrees(jnp.arctan2(u10, v10)), 360.0)
-    twa = jnp.mod(wind_from - bearing, 360.0)
-    mwa = jnp.mod(mwd - bearing, 360.0)
-
-    p = power_fn(tws, twa, swh, mwa, v, wps)
+    if align > 0.0:
+        lat, wlon, seg_dt = jm.resample(lat, wlon, seg_dt, cor.hours, jm.n_points(cor.hours, align))
+    segs = jm.segments(lat, wlon, seg_dt, dep_off)
+    first = tuple(f[:1] for f in fields)  # sliced inside the jitted program: no copy
+    p, swh, tws = (x[0] for x in jm.sample(first, axes, segs, power_fn, wps, lon_wrap))
     energy = jnp.sum(p * seg_dt) / 1000.0
 
     over_h = jnp.maximum(swh - pen.hs_soft, 0.0)
@@ -205,21 +179,9 @@ def _route_cost(
         over_p = jnp.maximum(p / pen.p_soft - 1.0, 0.0)
         p_env = p_env + jnp.sum(jnp.exp(pen.aP * over_p) - 1.0)
 
-    # The end points are the fixed ports, identical for every candidate. A port
-    # touching the raster would add a constant lambda_land offset that, in
-    # float32, rounds away small energy differences, so they are left out.
-    p_land = jnp.sum(_sample_mask(lmask, llat, lwlon, lat[1:-1], wlon[1:-1]))
-
+    p_land = land_term(land_arrs, lat, wlon)
     cost = energy + pen.lambda_env * p_env + pen.lambda_land * p_land
     return cost, energy, p_env, p_land
-
-
-def _sample_mask(mask, lat_ax, wlon_ax, lat, wlon):
-    yi, yf = jm._frac(lat_ax, lat)
-    xi, xf = jm._frac(wlon_ax, wlon)
-    c0 = mask[yi, xi] * (1 - xf) + mask[yi, xi + 1] * xf
-    c1 = mask[yi + 1, xi] * (1 - xf) + mask[yi + 1, xi + 1] * xf
-    return c0 * (1 - yf) + c1 * yf
 
 
 # ---------------------------------------------------------------------------
@@ -244,65 +206,80 @@ def time_alloc(speed_params, hours, L, n_speed):
 
 
 # ---------------------------------------------------------------------------
-# Batched penalized cost
+# Parameter vector <-> track
 # ---------------------------------------------------------------------------
-def make_batched_cost(grids, land, cor, L, wps, pen, K, power_fn, n_speed=0, align_dt_h=0.0):
-    """Return fn(theta_batch, dep_off) -> cost_batch (P,) on device.
+def theta_to_track(theta, cor, K, L, n_speed=0):
+    """``theta`` -> ``(lat, wlon, seg_dt)`` on the device (JAX arrays).
 
-    ``theta`` packs the 2*(K-2) interior Bezier coords followed by ``n_speed``
-    time-allocation log-weights (explicit speed; n_speed=0 = implicit).
-    ``power_fn`` is the injected ``(tws, twa, swh, mwa, v, wps) -> kW`` model.
-    ``align_dt_h`` > 0 integrates the cost on a uniform time grid (scorer-aligned).
-    ``dep_off`` is a *traced* argument, so the kernel compiles once per
-    (corridor, wps) and is reused across all departures.
+    ``theta`` packs the 2*(K-2) interior Bezier control points (normalized
+    frame) followed by ``n_speed`` time-allocation log-weights.
     """
+    n_geo = 2 * (K - 2)
     o_n = jnp.asarray(cor.norm(cor.o_lat, cor.o_wlon), jnp.float32)
     d_n = jnp.asarray(cor.norm(cor.d_lat, cor.d_wlon), jnp.float32)
-    r = jnp.linspace(0.0, 1.0, L, dtype=jnp.float32)
-    fields = (grids.u10, grids.v10, grids.swh, grids.mwd_sin, grids.mwd_cos)
-    axes = (grids.wlat, grids.wlon, grids.slat, grids.slon)
-    land_arrs = (land.mask, land.lat, land.wlon)
-    dt_h, nt, lon_wrap = grids.dt_h, grids.nt, grids.lon_wrap
-    n_geo = 2 * (K - 2)
+    interior = theta[:n_geo].reshape(K - 2, 2)
+    ctrl = jnp.concatenate([o_n[None, :], interior, d_n[None, :]], axis=0)
+    pts = bezier(ctrl, jnp.linspace(0.0, 1.0, L, dtype=jnp.float32))
+    lat, wlon = cor.denorm(pts[:, 0], pts[:, 1])
+    return lat, wlon, time_alloc(theta[n_geo:], cor.hours, L, n_speed)
+
+
+# ---------------------------------------------------------------------------
+# Batched penalized cost
+# ---------------------------------------------------------------------------
+def build_fit(cor, grids, land, pen, K, n_speed, L, align, wps, power_fn):
+    """Return ``(fit, shared)``: the batched cost for :mod:`timbers.cmaes`.
+
+    ``fit(theta_batch, cargs)`` with ``cargs = (dep_off, *shared)`` returns the
+    cost of every candidate; ``dep_off`` is the departure in hours after the
+    grids' ``t0``. ``grids`` is a :class:`timbers.model.Grids` (member 0 is
+    read) and ``land`` a :class:`DeviceLand`. The large arrays travel in
+    ``shared`` as traced arguments rather than being closed over, so they are
+    not baked into the compiled program as constants, and one compilation per
+    (corridor, wps) serves every departure.
+    """
+    lon_wrap = grids.lon_wrap
 
     def one(theta, dep_off, fields, axes, land_arrs):
-        interior = theta[:n_geo].reshape(K - 2, 2)
-        ctrl = jnp.concatenate([o_n[None, :], interior, d_n[None, :]], axis=0)
-        pts = bezier(ctrl, r)  # (L,2) normalized (nlat, nwlon)
-        seg_dt = time_alloc(theta[n_geo:], cor.hours, L, n_speed)
+        lat, wlon, seg_dt = theta_to_track(theta, cor, K, L, n_speed)
         cost, *_ = _route_cost(
             fields,
             axes,
             land_arrs,
             cor,
-            dt_h,
-            nt,
-            lon_wrap,
-            pts[:, 0],
-            pts[:, 1],
+            lat,
+            wlon,
             seg_dt,
             dep_off,
-            L,
             wps,
             pen,
             power_fn,
-            align_dt_h,
+            align,
+            lon_wrap,
         )
         return cost
 
     batched = jax.jit(jax.vmap(one, in_axes=(0, None, None, None, None)))
-    return lambda tb, dep_off: batched(tb, jnp.float32(dep_off), fields, axes, land_arrs)
+
+    def fit(theta_batch, cargs):
+        dep_off, fields, axes, land_arrs = cargs
+        return batched(theta_batch, dep_off, fields, axes, land_arrs)
+
+    return fit, (grids.fields, grids.axes, land.arrays)
 
 
 def decode_route(theta, cor, K, L, n_speed=0):
-    """theta -> (lats, wlons, seg_dt) in geographic working coords."""
+    """theta -> (lats, wlons, seg_dt) in geographic working coords (NumPy).
+
+    The host counterpart of :func:`theta_to_track`; it scales back to degrees in
+    float64.
+    """
     o_n = np.array(cor.norm(cor.o_lat, cor.o_wlon))
     d_n = np.array(cor.norm(cor.d_lat, cor.d_wlon))
     n_geo = 2 * (K - 2)
-    interior = theta[:n_geo].reshape(K - 2, 2)
+    interior = np.asarray(theta[:n_geo]).reshape(K - 2, 2)
     ctrl = jnp.asarray(np.vstack([o_n, interior, d_n]), jnp.float32)
-    r = jnp.linspace(0.0, 1.0, L, dtype=jnp.float32)
-    pts = np.array(bezier(ctrl, r))
+    pts = np.array(bezier(ctrl, jnp.linspace(0.0, 1.0, L, dtype=jnp.float32)))
     lat, wlon = cor.denorm(pts[:, 0], pts[:, 1])
     seg_dt = np.array(time_alloc(jnp.asarray(theta[n_geo:], jnp.float32), cor.hours, L, n_speed))
     return lat, wlon, seg_dt

@@ -14,13 +14,14 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "examples"))
 from toy_power import toy_power_jax, toy_power_np  # noqa: E402
 
 from timbers import cmaes as jc  # noqa: E402
-from timbers import fitness as jrf  # noqa: E402
 from timbers import model as jm  # noqa: E402
+from timbers.model import Grids  # noqa: E402
 from timbers import optimizer as op  # noqa: E402
 from timbers import solve as oj  # noqa: E402
 from timbers.scoring import evaluate_route, evaluate_route_full  # noqa: E402
@@ -60,7 +61,7 @@ def _grid():
 
 def _device_grids():
     wind, wave = _grid()
-    return jm.DeviceGrids(wind, wave), wind, wave
+    return Grids.from_era5(wind, wave), wind, wave
 
 
 def _land():
@@ -74,9 +75,10 @@ def test_device_optimizer_reduces_cost_and_pins_endpoints():
     grids, _, _ = _device_grids()
     land = _land()
     pen = op.Penalty()
-    fit, x0, shared = jrf.build_fit(
+    fit, shared = op.build_fit(
         COR, grids, land, pen, K, NSP, L, ALIGN, wps=False, power_fn=toy_power_jax
     )
+    x0 = jnp.asarray(op.gc_init_theta(COR, K, NSP), jnp.float32)
     dim = 2 * (K - 2) + NSP
     cargs0 = (jnp.float32(0.0),) + tuple(shared)
     init_cost = float(fit(x0[None, :], cargs0)[0])
@@ -110,7 +112,8 @@ def test_route_energy_model_path():
         False,
         toy_power_jax,
     )
-    e = float(e)
+    assert e.shape == (1,)
+    e = float(e[0])
     assert np.isfinite(e) and e > 0.0
 
 
@@ -150,7 +153,7 @@ def _storm_grid():
         "v10": wind["v10"] + (18.0 * blob).astype(np.float32),
     }
     wave = {**wave, "swh": wave["swh"] + (5.0 * blob).astype(np.float32)}
-    return jm.DeviceGrids(wind, wave), wind, wave
+    return Grids.from_era5(wind, wave), wind, wave
 
 
 def _solve(grids, wind, wave, land, n_speed):
@@ -188,31 +191,36 @@ def test_explicit_speed_beats_uniform_under_storm():
     assert e_timbers < e_bers  # and strictly better here
 
 
-def test_risk_scorer_and_robust_cost():
-    """risk.make_scorer scores a fixed route across an ensemble; risk.make_robust_cost
-    is a finite batched cost. The nominal member (index 0) must match the deterministic
-    scorer on the same route."""
-    from timbers import risk as rk
+def test_perturbation_surrogate():
+    """The forecast-error surrogate scores a fixed route across perturbations and
+    gives a finite expected-exceedance cost. The nominal row (index 0) must match
+    the deterministic host scorer on the same route."""
+    from timbers import ensemble as te
 
     grids, wind, wave = _storm_grid()
     land = _land()
-    perts = rk.perturbation_grid(dlat=(0.0, 0.4), dt=(0.0, 3.0), hs=(1.0, 1.2))  # 8, row0 nominal
+    perts = te.perturbation_grid(dlat=(0.0, 0.4), dt=(0.0, 3.0), hs=(1.0, 1.2))  # 8, row0 nominal
     assert tuple(perts[0]) == (0.0, 0.0, 0.0, 1.0, 1.0)
 
     theta = op.gc_init_theta(COR, K, 4)
     lat, wlon, seg = op.decode_route(theta, COR, K, L, 4)
     signed = op.working_to_signed(wlon)
 
-    scorer = rk.make_scorer(grids, COR, False, toy_power_jax, align=ALIGN)
-    E, Hs, TWS = scorer(
-        jnp.asarray(lat, jnp.float32),
-        jnp.asarray(signed, jnp.float32),
-        jnp.asarray(seg, jnp.float32),
-        0.0,
-        perts,
+    m = te.score_members(
+        grids,
+        COR,
+        lat,
+        wlon,
+        seg,
+        wps=False,
+        power_fn=toy_power_jax,
+        align=ALIGN,
+        hs_lim=7.0,
+        tws_lim=20.0,
+        perturbations=perts,
     )
-    E, Hs, TWS = np.asarray(E), np.asarray(Hs), np.asarray(TWS)
-    assert E.shape == Hs.shape == TWS.shape == (len(perts),)
+    E, Hs = m["energy_mwh"], m["max_hs"]
+    assert E.shape == Hs.shape == (len(perts),)
     assert np.isfinite(E).all() and (E > 0).all()
     # nominal-member energy matches the plain host scorer on the same route
     e_nom = evaluate_route_full(
@@ -227,10 +235,23 @@ def test_risk_scorer_and_robust_cost():
     )["energy_mwh"]
     assert abs(E[0] - e_nom) / e_nom < 0.02  # same physics, ±resample/precision
 
-    cost = rk.make_robust_cost(
-        grids, land, COR, L, False, K, 4, ALIGN, perts, toy_power_jax, hs_lim=7.0, us_lim=20.0
+    fit, shared = te.make_ensemble_cost(
+        grids,
+        land,
+        COR,
+        objective="chance_constrained",
+        safety_mode="mean",
+        L=L,
+        K=K,
+        n_speed=4,
+        align=ALIGN,
+        wps=False,
+        power_fn=toy_power_jax,
+        hs_lim=7.0,
+        tws_lim=20.0,
+        perturbations=perts,
     )
-    J = np.asarray(cost(jnp.asarray(theta, jnp.float32)[None, :], 0.0))
+    J = np.asarray(fit(jnp.asarray(theta, jnp.float32)[None, :], (jnp.float32(0.0), *shared)))
     assert J.shape == (1,) and np.isfinite(J).all()
 
 
@@ -262,3 +283,46 @@ def test_solve_corridor_backend():
     r = out[0]
     assert np.isfinite(r["energy_mwh"]) and r["energy_mwh"] > 0.0
     np.testing.assert_allclose(r["seg_dt"].sum(), COR.hours, rtol=1e-4)
+
+
+def test_windowed_grids_keep_the_clock():
+    """Grids cut to a window read the same weather at the same absolute time:
+    a departure at 06:00 costs the same on the full grid (offset 6 h) as on a
+    grid starting at 06:00 (offset 0), and offsets follow the window's t0."""
+    _, wind, wave = _device_grids()
+    dep = datetime(2024, 1, 1, 6)
+    full = Grids.from_era5(wind, wave)
+    window = Grids.from_era5(wind, wave, start=dep, hours=COR.hours)
+    assert full.hours_after_t0(dep) == 6.0 and window.hours_after_t0(dep) == 0.0
+
+    def cost(grids):
+        fit, shared = op.build_fit(
+            COR, grids, _land(), op.Penalty(), K, NSP, L, ALIGN, False, toy_power_jax
+        )
+        x0 = jnp.asarray(op.gc_init_theta(COR, K, NSP), jnp.float32)[None, :]
+        return float(fit(x0, (jnp.float32(grids.hours_after_t0(dep)), *shared))[0])
+
+    assert cost(window) == pytest.approx(cost(full), rel=1e-5)
+
+
+def test_departures_are_read_in_utc():
+    """A tz-aware departure is converted to UTC, as the host scorer does, and a
+    grid window cut at a tz-aware start keeps the UTC clock."""
+    from datetime import timezone
+
+    _, wind, wave = _device_grids()
+    plus2 = timezone(timedelta(hours=2))
+    full = Grids.from_era5(wind, wave)
+    assert full.hours_after_t0(datetime(2024, 1, 1, 8, tzinfo=plus2)) == 6.0
+    assert full.hours_after_t0(np.datetime64("2024-01-01T06:00")) == 6.0
+    window = Grids.from_era5(wind, wave, start=datetime(2024, 1, 1, 8, tzinfo=plus2), hours=24.0)
+    assert window.t0 == np.datetime64("2024-01-01T06:00:00")
+
+
+def test_from_era5_rejects_inconsistent_inputs():
+    _, wind, wave = _device_grids()
+    with pytest.raises(ValueError, match="together"):
+        Grids.from_era5(wind, wave, hours=24.0)
+    late = {**wave, "t0": wave["t0"] + np.timedelta64(1, "h")}
+    with pytest.raises(ValueError, match="same time"):
+        Grids.from_era5(wind, late)

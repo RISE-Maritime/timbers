@@ -1,11 +1,13 @@
 #!/usr/bin/env python
-"""ERA5 grid loader.
+"""Gridded weather on the host: loading, land filling and interpolation.
 
-Provides the three functions used by ``timbers.scoring``:
-
-    load_era5(paths)            -> grid dict
+    load_era5(paths)                         -> grid dict
     query(grid, var, lat, lon, hours)        -> linear interp of a scalar field
     query_angle(grid, var, lat, lon, hours)  -> circular interp of an angle field
+    fill_from_nearest_sea(a, masked)         -> land cells from the nearest sea cell
+
+``query`` and ``query_angle`` serve the host scorer (``timbers.scoring``); the
+device path takes the same grid dicts as ``timbers.model.Grids``.
 
 Grids are concatenated along time from one or more monthly ERA5 NetCDF files.
 The loader is tolerant of both ERA5 file schemas found in the CDS archive:
@@ -20,22 +22,39 @@ matching the reference scoring logic.
 Download ERA5 yourself from the Copernicus CDS (e.g. with the ``cdsapi``
 package) and point ``load_era5`` at the resulting NetCDF files. Cropping each
 field to a corridor bounding box keeps a full year comfortably in memory.
+
+**Land cells.** Wave reanalyses and forecasts leave land cells undefined (ERA5
+returns a masked array, ENS GRIB decodes to NaN). A zero fill would make land
+read as flat calm, cheaper in power and never breaching a wave limit, and so
+reward a route for cutting across a headland or sheltering behind a coast; it
+would also bias wave height low within one cell of every coastline through the
+interpolation stencil. Carrying the nearest sea cell's value inland
+(``fill_from_nearest_sea``, the default in ``load_era5``) avoids both without
+inventing a hazard: land is not a calm corridor, and a route that strays still
+reads plausible weather. Keeping routes off land is the exclusion penalty's job
+(``timbers.land.exclusion_raster``), not the wave field's.
 """
 
 from __future__ import annotations
 
+from datetime import timezone
 from pathlib import Path
 
 import numpy as np
 
-from .seafill import fill_from_nearest_sea
-
 try:  # netCDF4 is required to read the .nc files
     import netCDF4 as nc
 except ImportError as exc:  # pragma: no cover
-    raise ImportError("timbers.era5 requires the 'netCDF4' package") from exc
+    raise ImportError("timbers.weather requires the 'netCDF4' package") from exc
 
-__all__ = ["load_era5", "query", "query_angle"]
+__all__ = [
+    "load_era5",
+    "query",
+    "query_angle",
+    "fill_from_nearest_sea",
+    "nearest_sea_index",
+    "utc_datetime64",
+]
 
 # Data variables we know how to load, by file type. Coordinate/metadata
 # variables are skipped.
@@ -90,7 +109,7 @@ def load_era5(paths: list[str] | str, land_fill: str = "nearest") -> dict:
     land_fill : {"nearest", "zero"}
         How land-masked cells (ERA5 waves; masked or NaN) are filled. ``"nearest"`` (default)
         carries the nearest sea cell's value inland, so land does not read as
-        flat calm; see :mod:`timbers.seafill`. ``"zero"`` fills them with
+        flat calm; see :func:`fill_from_nearest_sea`. ``"zero"`` fills them with
         0.0.
 
     Returns
@@ -230,3 +249,51 @@ def query_angle(grid: dict, var: str, lat, lon, hours) -> np.ndarray:
     s = _combine({k: np.sin(v) for k, v in rad.items()}, tf, yf, xf)
     c = _combine({k: np.cos(v) for k, v in rad.items()}, tf, yf, xf)
     return np.mod(np.degrees(np.arctan2(s, c)), 360.0)
+
+
+# ---------------------------------------------------------------------------
+# Land cells
+# ---------------------------------------------------------------------------
+def nearest_sea_index(masked: np.ndarray):
+    """``(yi, xi)`` giving, for every cell of a 2-D grid, the nearest unmasked cell.
+
+    Unmasked cells index themselves. Raises if every cell is masked.
+    """
+    from scipy.ndimage import distance_transform_edt
+
+    masked = np.asarray(masked, bool)
+    if masked.all():
+        raise ValueError("every cell is masked, so there is nothing to fill from")
+    _, (yi, xi) = distance_transform_edt(masked, return_indices=True)
+    return yi, xi
+
+
+def fill_from_nearest_sea(a: np.ndarray, masked: np.ndarray) -> np.ndarray:
+    """``a`` with masked cells replaced by the nearest unmasked cell's value.
+
+    ``a`` is ``(..., Y, X)`` with the grid on the last two axes. ``masked`` is
+    boolean, either ``(Y, X)`` or the full shape of ``a``. The nearest-neighbour
+    map is built once from the union of the mask over the leading axes, and only
+    the cells masked at a given time (or member) are replaced. Returns ``a``
+    itself when nothing is masked.
+    """
+    masked = np.asarray(masked, bool)
+    if masked.shape[-2:] != a.shape[-2:]:
+        raise ValueError(f"mask {masked.shape} does not match grid {a.shape[-2:]}")
+    grid = masked.reshape(-1, *masked.shape[-2:]).any(axis=0) if masked.ndim > 2 else masked
+    if not grid.any():
+        return a
+    yi, xi = nearest_sea_index(grid)
+    return np.where(masked, a[..., yi, xi], a)
+
+
+def utc_datetime64(when) -> np.datetime64:
+    """``when`` as ``datetime64[s]`` in UTC, the clock of every grid.
+
+    A timezone-aware datetime is converted to UTC; a naive one, or a
+    ``datetime64``, is taken to be UTC already. Dropping the timezone without
+    converting would shift the weather a departure reads by its UTC offset.
+    """
+    if getattr(when, "tzinfo", None) is not None:
+        when = when.astimezone(timezone.utc).replace(tzinfo=None)
+    return np.datetime64(when, "s")

@@ -25,7 +25,9 @@ from toy_power import toy_power_jax  # noqa: E402
 
 from timbers import cmaes as jc  # noqa: E402
 from timbers import ensemble as te  # noqa: E402
+from timbers import model as jm  # noqa: E402
 from timbers import optimizer as op  # noqa: E402
+from timbers.model import Grids  # noqa: E402
 
 COR = op.Corridor("example", 43.6, -4.0, 40.6, -69.0, 48.0)
 K, L, NSP, ALIGN = 6, 40, 4, 0.25
@@ -85,7 +87,7 @@ def _gc_members(grids):
 
 
 def test_time_index_on_non_uniform_steps():
-    ti, tf = te.time_index(jnp.asarray([9.0, 15.0, 0.0]), jnp.asarray(STEPS))
+    ti, tf = jm.time_index(jnp.asarray([9.0, 15.0, 0.0]), jnp.asarray(STEPS))
     assert list(np.asarray(ti)) == [3, 4, 0]
     np.testing.assert_allclose(np.asarray(tf), [0.0, 0.5, 0.0], atol=1e-6)
 
@@ -94,7 +96,7 @@ def test_non_finite_fields_are_rejected():
     wind, wave = _members([1.0, 1.0])
     wave["swh"][0, 0, 3, 3] = np.nan
     with pytest.raises(ValueError, match="non-finite"):
-        te.EnsembleGrids(wind, wave, STEPS)
+        Grids(wind, wave, STEPS)
 
 
 def test_single_field_wraps_as_one_member():
@@ -103,7 +105,7 @@ def test_single_field_wraps_as_one_member():
     base = dict(lat=LAT, lon=LON, times=t, t0=t[0], dt_h=1.0)
     wind = {**base, "u10": np.ones(shape, np.float32), "v10": np.ones(shape, np.float32)}
     wave = {**base, "swh": np.ones(shape, np.float32), "mwd": np.zeros(shape, np.float32)}
-    g = te.as_ensemble(wind, wave, datetime(2024, 1, 1, 6), 48.0)
+    g = Grids.from_era5(wind, wave, datetime(2024, 1, 1, 6), 48.0)
     assert g.n_members == 1
     np.testing.assert_allclose(np.asarray(g.steps)[:3], [0.0, 1.0, 2.0])
     assert g.nt == 51
@@ -112,17 +114,17 @@ def test_single_field_wraps_as_one_member():
 def test_objectives_reduce_members_as_documented():
     """Calm weather, no penalties active: deterministic is member 0's energy and
     expected-value the member mean; identical members make all four agree."""
-    g = te.EnsembleGrids(*_members([0.5, 2.0, 3.0, 4.0]), STEPS)
+    g = Grids(*_members([0.5, 2.0, 3.0, 4.0]), STEPS)
     e = _gc_members(g)["energy_mwh"]
     assert _fit(g, "deterministic") == pytest.approx(e[0], rel=1e-5)
     assert _fit(g, "expected_value") == pytest.approx(e.mean(), rel=1e-5)
-    same = te.EnsembleGrids(*_members([2.0] * 4), STEPS)
+    same = Grids(*_members([2.0] * 4), STEPS)
     vals = [_fit(same, o) for o in te.OBJECTIVES]
     assert max(vals) == pytest.approx(min(vals), rel=1e-6)
 
 
 def test_breach_probability_counts_members():
-    g = te.EnsembleGrids(*_members([1.0, 1.0, 9.0, 9.0]), STEPS)  # two members above 7 m
+    g = Grids(*_members([1.0, 1.0, 9.0, 9.0]), STEPS)  # two members above 7 m
     m = _gc_members(g)
     assert (m["margin"] > 0).mean() == pytest.approx(0.5)
     # The chance constraint sees the two stormy members; the deterministic arm,
@@ -131,7 +133,7 @@ def test_breach_probability_counts_members():
 
 
 def test_series_integrates_to_route_energy():
-    g = te.EnsembleGrids(*_members([1.0, 2.0]), STEPS)
+    g = Grids(*_members([1.0, 2.0]), STEPS)
     lat, wlon, seg = op.decode_route(op.gc_init_theta(COR, K, NSP), COR, K, L, NSP)
     t = np.concatenate([[0.0], np.cumsum(np.asarray(seg))])
     s = te.member_series(g, t, lat, op.working_to_signed(wlon), wps=False, power_fn=toy_power_jax)
@@ -141,7 +143,7 @@ def test_series_integrates_to_route_energy():
 
 
 def test_cost_drives_the_optimizer():
-    g = te.EnsembleGrids(*_members([1.0, 3.0, 5.0, 8.0]), STEPS)
+    g = Grids(*_members([1.0, 3.0, 5.0, 8.0]), STEPS)
     fit, shared = te.make_ensemble_cost(
         g,
         _land(),
@@ -180,9 +182,9 @@ def _hourly(n=100, lat=LAT, lon=LON, swh=None):
 def test_single_field_must_cover_the_window_on_its_steps():
     wind, wave = _hourly(60)
     with pytest.raises(ValueError, match="ends before"):
-        te.as_ensemble(wind, wave, datetime(2024, 1, 1, 6), 60.0)
+        Grids.from_era5(wind, wave, datetime(2024, 1, 1, 6), 60.0)
     with pytest.raises(ValueError, match="not on a time step"):
-        te.as_ensemble(wind, wave, datetime(2024, 1, 1, 6, 20), 24.0)
+        Grids.from_era5(wind, wave, datetime(2024, 1, 1, 6, 20), 24.0)
 
 
 def test_antimeridian_midpoints_sample_the_weather_at_180():
@@ -191,8 +193,8 @@ def test_antimeridian_midpoints_sample_the_weather_at_180():
     lat = np.arange(30.0, 40.001, 0.5)
     lon = np.arange(140.0, 230.001, 0.5)
     band = np.where((lon >= 150.0) & (lon <= 210.0), 1.0, 8.0)
-    calm = te.as_ensemble(*_hourly(lat=lat, lon=lon), datetime(2024, 1, 1), 60.0)
-    banded = te.as_ensemble(*_hourly(lat=lat, lon=lon, swh=band), datetime(2024, 1, 1), 60.0)
+    calm = Grids.from_era5(*_hourly(lat=lat, lon=lon), datetime(2024, 1, 1), 60.0)
+    banded = Grids.from_era5(*_hourly(lat=lat, lon=lon, swh=band), datetime(2024, 1, 1), 60.0)
     cor = op.Corridor("pacific", 35.0, 170.0, 35.0, 200.0, 48.0)
     llat, lwlon = np.arange(30.0, 40.001, 1.0), np.arange(140.0, 230.001, 1.0)
     land = op.DeviceLand(
@@ -231,7 +233,7 @@ def test_antimeridian_midpoints_sample_the_weather_at_180():
 
 def test_port_on_land_keeps_cost_resolution():
     """A port inside the land raster adds nothing to the cost."""
-    g = te.EnsembleGrids(*_members([1.0, 2.0]), STEPS)
+    g = Grids(*_members([1.0, 2.0]), STEPS)
     llat, lwlon = np.arange(35.0, 50.001, 0.25), np.arange(-75.0, 5.001, 0.25)
     coast = np.zeros((llat.size, lwlon.size), np.float32)
     iy, ix = np.abs(llat - COR.o_lat).argmin(), np.abs(lwlon - COR.o_wlon).argmin()
@@ -258,3 +260,47 @@ def test_port_on_land_keeps_cost_resolution():
         out.append(np.asarray(fit(jnp.asarray(theta), (jnp.float32(0.0), *shared))))
     assert len(np.unique(out[0])) == 64
     np.testing.assert_array_equal(out[1], out[0])
+
+
+def test_perturbations_multiply_members_perturbation_major():
+    """With perturbations, members are (perturbation, member) pairs in
+    perturbation-major order, and the unperturbed row reproduces the members."""
+    g = Grids(*_members([1.0, 2.0, 3.0]), STEPS)
+    plain = _gc_members(g)
+    perts = te.perturbation_grid(hs=(1.0, 2.0))
+    lat, wlon, seg = op.decode_route(op.gc_init_theta(COR, K, NSP), COR, K, L, NSP)
+    m = te.score_members(
+        g,
+        COR,
+        lat,
+        wlon,
+        seg,
+        wps=False,
+        power_fn=toy_power_jax,
+        align=ALIGN,
+        perturbations=perts,
+        **LIMITS,
+    )
+    np.testing.assert_allclose(m["max_hs"], [1, 2, 3, 2, 4, 6], rtol=1e-6)
+    np.testing.assert_array_equal(m["energy_mwh"][:3], plain["energy_mwh"])
+
+
+def test_mean_safety_is_the_mean_member_penalty():
+    """safety_mode="mean" averages the members' soft penalties: with identical
+    members it equals member 0's, i.e. the deterministic objective, and with one
+    stormy member out of four it is a quarter of that member's penalty."""
+    same = Grids(*_members([6.9] * 4), STEPS)
+    det = _fit(same, "deterministic")
+    assert det > _fit(Grids(*_members([1.0] * 4), STEPS), "deterministic")  # penalty active
+    assert _fit(same, "chance_constrained", safety_mode="mean") == pytest.approx(det, rel=1e-6)
+
+    # chance_constrained takes energy from member 0 (calm here), so the mixed cost
+    # exceeds the all-calm one by the storm member's penalty alone, over 4.
+    storm_g, calm_g = Grids(*_members([6.9]), STEPS), Grids(*_members([1.0]), STEPS)
+    storm, calm = _fit(storm_g, "deterministic"), _fit(calm_g, "deterministic")
+    extra_energy = _gc_members(storm_g)["energy_mwh"][0] - _gc_members(calm_g)["energy_mwh"][0]
+    storm_penalty = storm - calm - float(extra_energy)
+    mixed = _fit(
+        Grids(*_members([1.0, 1.0, 1.0, 6.9]), STEPS), "chance_constrained", safety_mode="mean"
+    )
+    assert mixed - calm == pytest.approx(storm_penalty / 4, rel=1e-3)

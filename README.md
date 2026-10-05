@@ -14,8 +14,8 @@ out to be the first-order energy lever; global geometry is not.
 
 > **Bring your own power model and cases.** This is a *method* library: the
 > optimizer, the GPU sep-CMA-ES, the differentiable cost, the gradient polish,
-> the land mask, the ERA5 loader, the risk-aware extension and forecast-ensemble
-> objectives. It does **not**
+> the land mask, the ERA5 loader and uncertainty-aware objectives (forecast
+> ensembles and a forecast-error surrogate). It does **not**
 > include any vessel performance model or routing cases — you inject a
 > `power_fn(tws, twa_deg, swh, mwa_deg, v, wps) -> kW` and supply your own
 > corridors/weather. A trivial toy model and a runnable demo are in
@@ -37,18 +37,18 @@ out to be the first-order energy lever; global geometry is not.
 4. **Stage 2 — gradient polish.** Per-waypoint lateral offsets along the route
    normal, co-refined with the speed profile, under gentle Adam + curvature
    regularization, keeping the best scored-feasible iterate.
-5. **Risk-aware extension** (`timbers.risk`). Perturbation-fragility scoring
-   and a chance-constrained objective over a forecast-error surrogate ensemble
-   (spatial/temporal shift + amplitude scale of the weather sampling).
-6. **Forecast-ensemble objectives** (`timbers.ensemble`). The route cost
-   evaluated over a real ensemble (fields with a member axis and non-uniform
-   forecast steps, e.g. ECMWF ENS), with four objectives that differ only in
-   how members are reduced: cost from the nominal member or the member mean,
-   safety from the nominal member or an ensemble chance constraint
-   (`deterministic`, `expected_value`, `chance_constrained`, `joint`).
-   `score_members` gives per-member outcomes of a fixed route, `member_series`
-   per-segment values along a timed track, and `as_ensemble` wraps a single
-   field (e.g. ERA5) as a one-member ensemble for perfect-information solves.
+5. **Uncertainty-aware objectives** (`timbers.ensemble`). The route cost
+   evaluated over an ensemble: a real forecast ensemble (fields with a member
+   axis and non-uniform forecast steps, e.g. ECMWF ENS), a forecast-error
+   surrogate built by perturbing one field (spatial/temporal shift + amplitude
+   scale, `perturbation_grid`), or both. Four objectives differ only in how
+   members are reduced: cost from the nominal member or the member mean, safety
+   from the nominal member or an ensemble constraint (`deterministic`,
+   `expected_value`, `chance_constrained`, `joint`; the ensemble constraint is a
+   breach probability, a CVaR, or the mean exceedance penalty).
+   `score_members` gives per-member outcomes of a fixed route (its fragility,
+   under the surrogate) and `member_series` per-segment values along a timed
+   track.
 
 Details, design rationale, and negative results: [docs/method.md](docs/method.md).
 
@@ -76,8 +76,8 @@ same code path gives both. It prints a 2×2 ablation (uniform vs explicit speed 
 Stage 1 only vs + polish) on a storm scenario; see
 [docs/method.md](docs/method.md) § *TiMBERS vs BERS*.
 
-`examples/run_risk.py` demonstrates the risk-aware extension (`timbers.risk`):
-it optimizes a deterministic and a robust (chance-constrained) route for the
+`examples/run_risk.py` demonstrates the forecast-error surrogate
+(`timbers.ensemble`): it optimizes a deterministic and a robust route for the
 same storm departure, then scores both across a forecast-error surrogate
 ensemble — showing the robust route trade a little nominal energy for a much
 lower chance of exceeding the wave limit.
@@ -88,8 +88,10 @@ backend, all on synthetic grids with the toy power model.
 
 ## Using your own problem
 
-- **Weather**: load gridded NetCDF with `timbers.era5.load_era5`, or build the
-  grid dicts directly (see `examples/run_toy.py`).
+- **Weather**: load gridded NetCDF with `timbers.weather.load_era5`, or build the
+  grid dicts directly (see `examples/run_toy.py`). The device path takes them as
+  `timbers.model.Grids`: `Grids.from_era5(wind, wave)` for a single field, or
+  `Grids(wind, wave, steps)` for fields with a member axis.
 - **Power model**: implement `power_fn(tws, twa_deg, swh, mwa_deg, v, wps) -> kW`.
   The device path (`timbers.model`/`timbers.optimizer`) calls it on JAX arrays;
   the host scorer (`timbers.scoring`) on NumPy arrays — `solve_corridor` and
@@ -128,7 +130,7 @@ backend, all on synthetic grids with the toy power model.
 TiMBERS bundles no data. If you use the loaders/scripts:
 
 - **ERA5** reanalysis — Copernicus Climate Change Service (C3S) / ECMWF;
-  downloaded by the user under the C3S licence (used by `timbers.era5`).
+  downloaded by the user under the C3S licence (used by `timbers.weather`).
 - **Natural Earth** land polygons — public domain (fetched by
   `scripts/download_natural_earth.py`, used by `timbers.land`).
 

@@ -1,58 +1,156 @@
 #!/usr/bin/env python
-"""GPU/JAX route-energy evaluator for the optimizer.
+"""Weather grids on the device and the route-sampling core.
 
-Evaluates the scorer's physics on-device so CMA-ES can evaluate large batches
-of candidate routes cheaply and the polish stage can take gradients. The energy
-path mirrors ``timbers.scoring.evaluate_route_full``: weather is interpolated
-trilinearly at segment midpoints, power comes from an injected power model
-(``power_fn``), and energy is ``sum(P * dt)``.
+Every cost and scorer on the device path is a reduction over :func:`sample`:
+the track is cut into segments, the weather is interpolated trilinearly at each
+segment's midpoint and mid-time for every ensemble member, and the injected
+power model gives the shaft power there. The optimizer's cost
+(:mod:`timbers.optimizer`) reads one member; the ensemble objectives and
+scorers (:mod:`timbers.ensemble`) reduce over all of them. The physics mirrors
+the host scorer, ``timbers.scoring.evaluate_route_full``.
 
 The power model is not part of this library; pass your own ``power_fn`` with the
 signature ``power_fn(tws, twa_deg, swh, mwa_deg, v, wps) -> kW`` (operating on
 JAX arrays for this device path). See ``examples/toy_power.py``.
-
-Grids are pushed to the device as float32 via :class:`DeviceGrids`.
 """
 
 from __future__ import annotations
+
+import math
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
-from .geo import midpoint_lon
+from .geo import bearing_deg, haversine_m, midpoint_lon, to_grid_lon
+from .weather import utc_datetime64
 
 jax.config.update("jax_enable_x64", False)
 
 
 # ---------------------------------------------------------------------------
-# Grid container
+# Grids
 # ---------------------------------------------------------------------------
-class DeviceGrids:
-    """Wind+wave corridor grids resident on the JAX device (float32)."""
+class Grids:
+    """Wind and wave fields on the device, float32, with a member axis.
 
-    def __init__(self, wind: dict, wave: dict):
-        self.t0_wind = wind["t0"]
-        self.dt_h = float(wind["dt_h"])
-        # axes
-        self.wlat = jnp.asarray(wind["lat"], jnp.float32)
-        self.wlon = jnp.asarray(wind["lon"], jnp.float32)
-        self.slat = jnp.asarray(wave["lat"], jnp.float32)
-        self.slon = jnp.asarray(wave["lon"], jnp.float32)
-        # fields (T, Y, X)
-        self.u10 = jnp.asarray(wind["u10"], jnp.float32)
-        self.v10 = jnp.asarray(wind["v10"], jnp.float32)
-        self.swh = jnp.asarray(wave["swh"], jnp.float32)
-        mwd_rad = np.radians(wave["mwd"].astype(np.float64))
-        self.mwd_sin = jnp.asarray(np.sin(mwd_rad), jnp.float32)
-        self.mwd_cos = jnp.asarray(np.cos(mwd_rad), jnp.float32)
-        self.nt = self.u10.shape[0]
-        # wave/wind share the same time base (built together by repackage)
-        self.lon_wrap = bool(wind["lon"][0] >= 0 and wind["lon"][-1] > 180)
+    Every field is ``(member, time, lat, lon)``. ``steps`` gives the time of each
+    slice in hours after ``t0``, and need not be uniform (ECMWF ENS is 3-hourly
+    to 144 h, then 6-hourly). A single field such as ERA5 is a one-member grid;
+    build it with :meth:`from_era5`.
+
+    ``wind`` holds ``u10``, ``v10``, ``lat``, ``lon``; ``wave`` holds ``swh``,
+    ``mwd`` (degrees), ``lat``, ``lon``. Wind and wave may be on different
+    spatial grids but share ``steps``. ``t0`` (``datetime64``) is optional and
+    only used by :meth:`hours_after_t0`.
+
+    ``consume=True`` removes the field arrays from ``wind`` and ``wave`` as they
+    are moved to the device, which roughly halves peak host memory for a large
+    ensemble; it is off by default because it empties the caller's dicts.
+
+    Fields must be finite. Land-masked wave cells are typically NaN in decoded
+    GRIB; fill them first, for example with
+    :func:`timbers.weather.fill_from_nearest_sea`. A NaN objective would not
+    raise inside the optimizer: the candidate would be silently ranked out.
+    """
+
+    def __init__(self, wind: dict, wave: dict, steps, *, t0=None, consume: bool = False):
+        take = (lambda d, k: d.pop(k)) if consume else (lambda d, k: d[k])
+        self.t0 = None if t0 is None else np.datetime64(t0, "s")
+        self.steps = jnp.asarray(np.asarray(steps, np.float32))
+        self.wind_lat = jnp.asarray(wind["lat"], jnp.float32)
+        self.wind_lon = jnp.asarray(wind["lon"], jnp.float32)
+        self.wave_lat = jnp.asarray(wave["lat"], jnp.float32)
+        self.wave_lon = jnp.asarray(wave["lon"], jnp.float32)
+        self.u10 = jnp.asarray(take(wind, "u10"), jnp.float32)
+        self.v10 = jnp.asarray(take(wind, "v10"), jnp.float32)
+        self.swh = jnp.asarray(take(wave, "swh"), jnp.float32)
+        # Direction as sine and cosine so interpolation does not wrap at 360.
+        # Computed in float32 one array at a time to bound host memory.
+        mwd = np.radians(np.asarray(take(wave, "mwd")).astype(np.float32, copy=False))
+        self.mwd_sin = jnp.asarray(np.sin(mwd, dtype=np.float32))
+        self.mwd_cos = jnp.asarray(np.cos(mwd, dtype=np.float32))
+        del mwd
+        for name, arr in zip(("u10", "v10", "swh", "mwd_sin", "mwd_cos"), self.fields):
+            if arr.ndim != 4:
+                raise ValueError(f"{name} must be (member, time, lat, lon), got {arr.shape}")
+            if not bool(jnp.all(jnp.isfinite(arr))):
+                n = int(jnp.sum(~jnp.isfinite(arr)))
+                raise ValueError(
+                    f"{name} has {n:,} non-finite values; fill land-masked "
+                    "cells before use (timbers.weather.fill_from_nearest_sea)"
+                )
+        self.n_members, self.nt = self.u10.shape[:2]
+        if self.steps.shape[0] != self.nt:
+            raise ValueError(f"{self.steps.shape[0]} steps for {self.nt} time slices")
+        lon = np.asarray(wind["lon"])
+        self.lon_wrap = bool(lon[0] >= 0 and lon[-1] > 180)
+
+    @classmethod
+    def from_era5(cls, wind: dict, wave: dict, start=None, hours: float | None = None):
+        """A single gridded field (e.g. from ``load_era5``) as a one-member grid.
+
+        Without ``start``, the whole grid is used and ``t0`` is the grid's first
+        time; both grids must start then. With ``start`` (a datetime; tz-aware
+        is converted to UTC) and ``hours``, the grid is cut to the window
+        ``[start, start + hours]`` and ``t0 = start``; ``start`` must fall on a
+        time step of both grids and both must cover the window. Anything else
+        raises ``ValueError``.
+        """
+        dt = float(wind["dt_h"])
+        if float(wave["dt_h"]) != dt:
+            raise ValueError("wind and wave grids must share a time step")
+        if (start is None) != (hours is None):
+            raise ValueError("pass start and hours together, or neither")
+        if start is None:
+            if np.datetime64(wave["t0"], "s") != np.datetime64(wind["t0"], "s"):
+                raise ValueError("wind and wave grids must start at the same time")
+            t0, i0, n = np.datetime64(wind["t0"], "s"), 0, None
+        else:
+            t0 = utc_datetime64(start)
+            n = int(hours / dt) + 3
+        out = {}
+        for name, g, keys in (("wind", wind, ("u10", "v10")), ("wave", wave, ("swh", "mwd"))):
+            if start is not None:
+                off = float((t0 - g["t0"]) / np.timedelta64(1, "h")) / dt
+                i0 = int(round(off))
+                if abs(off - i0) > 1e-6:
+                    raise ValueError(f"{start} is not on a time step of the {name} grid")
+                if i0 < 0:
+                    raise ValueError(f"{name} grid starts after {start}")
+            stop = None if n is None else i0 + n
+            out[name] = {k: np.asarray(g[k][i0:stop])[None] for k in keys}
+            if start is not None and out[name][keys[0]].shape[1] < math.ceil(hours / dt) + 1:
+                raise ValueError(f"{name} grid ends before {start} + {hours} h")
+            out[name]["lat"], out[name]["lon"] = g["lat"], g["lon"]
+        nt = min(out["wind"]["u10"].shape[1], out["wave"]["swh"].shape[1])
+        for side, keys in (("wind", ("u10", "v10")), ("wave", ("swh", "mwd"))):
+            for k in keys:
+                out[side][k] = out[side][k][:, :nt]
+        return cls(out["wind"], out["wave"], np.arange(nt) * dt, t0=t0)
+
+    @property
+    def fields(self):
+        return (self.u10, self.v10, self.swh, self.mwd_sin, self.mwd_cos)
+
+    @property
+    def axes(self):
+        return (self.wind_lat, self.wind_lon, self.wave_lat, self.wave_lon, self.steps)
+
+    def hours_after_t0(self, when) -> float:
+        """Hours from ``t0`` to ``when``, e.g. a departure offset.
+
+        ``when`` is a datetime (naive is taken as UTC; tz-aware is converted) or
+        a ``datetime64``.
+        """
+        if self.t0 is None:
+            raise ValueError("these grids have no t0")
+        return float((utc_datetime64(when) - self.t0) / np.timedelta64(1, "h"))
 
 
 # ---------------------------------------------------------------------------
-# Trilinear interpolation (lat, lon, time) on a regular grid
+# Interpolation
 # ---------------------------------------------------------------------------
 def _frac(coord, values):
     n = coord.shape[0]
@@ -62,7 +160,16 @@ def _frac(coord, values):
     return i0, fi - i0
 
 
-def _interp(field, lat_ax, lon_ax, lat, lon, ti, tf, nt):
+def time_index(hours, steps):
+    """Bracketing index and fraction of ``hours`` on an ascending step vector."""
+    nt = steps.shape[0]
+    ti = jnp.clip(jnp.searchsorted(steps, hours, side="right") - 1, 0, nt - 2)
+    t0, t1 = steps[ti], steps[ti + 1]
+    return ti, jnp.clip((hours - t0) / jnp.maximum(t1 - t0, 1e-6), 0.0, 1.0)
+
+
+def _interp(field, lat_ax, lon_ax, lat, lon, ti, tf):
+    """Trilinear interpolation of a (time, lat, lon) field."""
     yi, yf = _frac(lat_ax, lat)
     xi, xf = _frac(lon_ax, lon)
 
@@ -78,66 +185,113 @@ def _interp(field, lat_ax, lon_ax, lat, lon, ti, tf, nt):
     return c0 * (1 - tf) + c1 * tf
 
 
-def _time_index(hours, dt_h, nt):
-    tr = jnp.clip(hours / dt_h, 0.0, nt - 1.0)
-    ti = jnp.clip(jnp.floor(tr).astype(jnp.int32), 0, nt - 2)
-    return ti, tr - ti
-
-
 # ---------------------------------------------------------------------------
-# Route energy
+# Tracks and segments
 # ---------------------------------------------------------------------------
-_R_EARTH = 6_371_000.0
+# Snapping the number of integration points to a geometric ladder bounds the
+# number of distinct compiled kernels when the same cost is built for many
+# passages of different length (as in re-planning, where the remaining time
+# shrinks every cycle), so the compilation cache is reused instead of growing.
+# The step lands within sqrt(1.5) of the requested ``align``.
+_M_LADDER = (32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536)
 
 
-def _haversine_m(lat1, lon1, lat2, lon2):
-    lat1r, lat2r = jnp.radians(lat1), jnp.radians(lat2)
-    dlat = lat2r - lat1r
-    dlon = jnp.radians(lon2 - lon1)
-    a = jnp.sin(dlat / 2) ** 2 + jnp.cos(lat1r) * jnp.cos(lat2r) * jnp.sin(dlon / 2) ** 2
-    return _R_EARTH * 2 * jnp.arctan2(jnp.sqrt(a), jnp.sqrt(1 - a))
+def n_points(hours: float, align: float, quantise: bool = False) -> int:
+    """Number of uniform-time segments of about ``align`` hours in ``hours``.
 
-
-def _bearing_deg(lat1, lon1, lat2, lon2):
-    lat1r, lat2r = jnp.radians(lat1), jnp.radians(lat2)
-    dlon = jnp.radians(lon2 - lon1)
-    x = jnp.sin(dlon) * jnp.cos(lat2r)
-    y = jnp.cos(lat1r) * jnp.sin(lat2r) - jnp.sin(lat1r) * jnp.cos(lat2r) * jnp.cos(dlon)
-    return jnp.mod(jnp.degrees(jnp.arctan2(x, y)), 360.0)
-
-
-def route_energy(grids: DeviceGrids, lats, lons, seg_dt_h, dep_offset_h, wps: bool, power_fn):
-    """Total energy (MWh) for a single polyline route.
-
-    Parameters
-    ----------
-    lats, lons : (L,) device arrays of waypoint coordinates (lon in deg, signed).
-    seg_dt_h   : (L-1,) hours per segment.
-    dep_offset_h : float, hours from grid t0 to departure.
-    power_fn : callable ``(tws, twa_deg, swh, mwa_deg, v, wps) -> kW`` on JAX arrays.
+    ``quantise=True`` snaps it to a fixed ladder of sizes (see ``_M_LADDER``).
     """
-    lons = jnp.where(lons < 0, lons + 360.0, lons) if grids.lon_wrap else lons
-    mid_lat = (lats[:-1] + lats[1:]) / 2
-    mid_lon = midpoint_lon(lons[:-1], lons[1:], grids.lon_wrap)
-    cum = jnp.cumsum(seg_dt_h)
-    seg_mid_h = dep_offset_h + cum - seg_dt_h / 2
+    if not quantise:
+        return max(1, int(round(hours / align)))
+    m = hours / align
+    return min(_M_LADDER, key=lambda c: abs(math.log(c / m)))
 
-    ti, tf = _time_index(seg_mid_h, grids.dt_h, grids.nt)
-    u10 = _interp(grids.u10, grids.wlat, grids.wlon, mid_lat, mid_lon, ti, tf, grids.nt)
-    v10 = _interp(grids.v10, grids.wlat, grids.wlon, mid_lat, mid_lon, ti, tf, grids.nt)
-    swh = _interp(grids.swh, grids.slat, grids.slon, mid_lat, mid_lon, ti, tf, grids.nt)
-    ms = _interp(grids.mwd_sin, grids.slat, grids.slon, mid_lat, mid_lon, ti, tf, grids.nt)
-    mc = _interp(grids.mwd_cos, grids.slat, grids.slon, mid_lat, mid_lon, ti, tf, grids.nt)
-    mwd = jnp.mod(jnp.degrees(jnp.arctan2(ms, mc)), 360.0)
 
-    dist = _haversine_m(lats[:-1], lons[:-1], lats[1:], lons[1:])
-    v = dist / (seg_dt_h * 3600.0)
-    bearing = _bearing_deg(lats[:-1], lons[:-1], lats[1:], lons[1:])
+def resample(lat, wlon, seg_dt, hours: float, m: int):
+    """A track resampled to ``m`` segments of equal duration.
 
-    tws = jnp.sqrt(u10**2 + v10**2)
-    wind_from = jnp.mod(180.0 + jnp.degrees(jnp.arctan2(u10, v10)), 360.0)
-    twa = jnp.mod(wind_from - bearing, 360.0)
-    mwa = jnp.mod(mwd - bearing, 360.0)
+    ``lat``, ``wlon`` (continuous working longitude) and ``seg_dt`` (hours) as
+    from :func:`timbers.optimizer.decode_route`. Returns ``(lat, wlon, seg_dt)``
+    with ``m + 1`` points, so the cost integrates where the scorer does.
+    """
+    t_cum = jnp.concatenate([jnp.zeros(1, lat.dtype), jnp.cumsum(seg_dt)])
+    tau = jnp.linspace(0.0, hours, m + 1).astype(lat.dtype)
+    return (
+        jnp.interp(tau, t_cum, lat),
+        jnp.interp(tau, t_cum, wlon),
+        jnp.full((m,), hours / m, lat.dtype),
+    )
 
-    p = power_fn(tws, twa, swh, mwa, v, wps)
-    return jnp.sum(p * seg_dt_h) / 1000.0
+
+class Segments(NamedTuple):
+    """Per-segment quantities of a timed track, where the weather is sampled."""
+
+    v: object  # speed over ground, m/s
+    bearing: object  # degrees
+    mid_lat: object
+    mid_lon: object  # signed
+    t_mid: object  # hours after the grids' t0
+    seg_h: object  # duration, hours
+
+
+def segments(lat, lon, seg_dt, dep_off, xp=jnp) -> Segments:
+    """Cut a track into segments. ``lon`` may be signed or continuous working
+    longitude; ``dep_off`` is the departure in hours after the grids' ``t0``."""
+    glon = to_grid_lon(lon, False)
+    dist = haversine_m(lat[:-1], glon[:-1], lat[1:], glon[1:], xp=xp)
+    return Segments(
+        v=dist / (seg_dt * 3600.0),
+        bearing=bearing_deg(lat[:-1], glon[:-1], lat[1:], glon[1:], xp=xp),
+        mid_lat=(lat[:-1] + lat[1:]) / 2,
+        mid_lon=midpoint_lon(glon[:-1], glon[1:], False),
+        t_mid=dep_off + xp.cumsum(seg_dt) - seg_dt / 2,
+        seg_h=seg_dt,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Sampling
+# ---------------------------------------------------------------------------
+def sample(fields, axes, segs: Segments, power_fn, wps, lon_wrap: bool, perturbation=None):
+    """Shaft power (kW), Hs (m) and TWS (m/s) per member and segment.
+
+    ``fields`` and ``axes`` are ``Grids.fields`` and ``Grids.axes``, passed
+    explicitly so that a jitted caller can take them as traced arguments rather
+    than closing over them (which would bake multi-GB arrays into the compiled
+    program as constants). Returns three ``(member, segment)`` arrays.
+
+    ``perturbation`` is an optional ``(dlat, dlon, dt_h, hs_scale, wind_scale)``
+    applied to where and when the weather is read, and to its amplitude; the
+    route's own geometry and speed are unchanged. It is the forecast-error
+    surrogate of :func:`timbers.ensemble.perturbation_grid`.
+    """
+    wind_lat, wind_lon, wave_lat, wave_lon, steps = axes
+    qlat, qlon, qt = segs.mid_lat, segs.mid_lon, segs.t_mid
+    hs_scale = wind_scale = 1.0
+    if perturbation is not None:
+        dlat, dlon, dt, hs_scale, wind_scale = (perturbation[i] for i in range(5))
+        qlat, qlon, qt = qlat + dlat, qlon + dlon, qt + dt
+    qlon = to_grid_lon(qlon, lon_wrap)
+    ti, tf = time_index(qt, steps)
+
+    def one(u10m, v10m, swhm, msm, mcm):
+        u10 = _interp(u10m, wind_lat, wind_lon, qlat, qlon, ti, tf) * wind_scale
+        v10 = _interp(v10m, wind_lat, wind_lon, qlat, qlon, ti, tf) * wind_scale
+        swh = _interp(swhm, wave_lat, wave_lon, qlat, qlon, ti, tf) * hs_scale
+        ms = _interp(msm, wave_lat, wave_lon, qlat, qlon, ti, tf)
+        mc = _interp(mcm, wave_lat, wave_lon, qlat, qlon, ti, tf)
+        mwd = jnp.mod(jnp.degrees(jnp.arctan2(ms, mc)), 360.0)
+        tws = jnp.sqrt(u10**2 + v10**2)
+        wind_from = jnp.mod(180.0 + jnp.degrees(jnp.arctan2(u10, v10)), 360.0)
+        twa = jnp.mod(wind_from - segs.bearing, 360.0)
+        mwa = jnp.mod(mwd - segs.bearing, 360.0)
+        return power_fn(tws, twa, swh, mwa, segs.v, wps), swh, tws
+
+    return jax.vmap(one)(*fields)
+
+
+def route_energy(grids: Grids, lat, lon, seg_dt, dep_off, wps: bool, power_fn):
+    """Energy (MWh) of a timed track for each member, on its native segments."""
+    segs = segments(lat, lon, seg_dt, dep_off)
+    p, _, _ = sample(grids.fields, grids.axes, segs, power_fn, wps, grids.lon_wrap)
+    return jnp.sum(p * seg_dt, axis=-1) / 1000.0

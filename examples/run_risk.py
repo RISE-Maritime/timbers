@@ -4,12 +4,13 @@ Uses the synthetic storm scenario + toy power model from ``run_toy.py``. For one
 departure it optimizes two routes:
 
   * deterministic -- minimize nominal energy (the standard cost,
-    ``optimizer.make_batched_cost``);
+    ``optimizer.build_fit``);
   * robust        -- minimize nominal energy + expected limit-exceedance over a
-    forecast-error surrogate ensemble (``risk.make_robust_cost``).
+    forecast-error surrogate ensemble (``ensemble.make_ensemble_cost`` with
+    ``perturbations`` and ``safety_mode="mean"``).
 
 Both are then scored across the SAME perturbation ensemble with
-``risk.make_scorer`` (the fragility diagnostic), and we report nominal energy,
+``ensemble.score_members`` (the fragility diagnostic), and we report nominal energy,
 nominal max Hs, and the fraction of perturbations whose max Hs exceeds the limit
 -- i.e. how often the route would be infeasible if the forecast is a bit off.
 
@@ -27,9 +28,9 @@ import numpy as np
 from run_toy import COR, K, L, ALIGN, synthetic_grids
 
 from timbers import cmaes as jc
-from timbers import model as jm
+from timbers import ensemble as te
 from timbers import optimizer as op
-from timbers import risk as rk
+from timbers.model import Grids
 from toy_power import toy_power_jax
 
 NSP = 6
@@ -46,10 +47,9 @@ def _land():
     )
 
 
-def _optimize(cost_fn, x0, dim, seed=0):
-    """Single-instance sep-CMA solve against a batched cost fn(theta_batch, dep_off)."""
+def _optimize(fit, shared, x0, dim, seed=0):
+    """Single-instance sep-CMA solve of a ``(fit, shared)`` batched cost."""
     hp = jc.hyperparams(dim, POP)
-    fit = lambda X, cargs: cost_fn(X, cargs[0])  # noqa: E731
     bx, _ = jc.run(
         jnp.asarray(x0, jnp.float32),
         fit,
@@ -58,61 +58,63 @@ def _optimize(cost_fn, x0, dim, seed=0):
         POP,
         ITERS,
         jax.random.PRNGKey(seed),
-        (jnp.float32(DEP_OFF),),
+        (jnp.float32(DEP_OFF), *shared),
     )
     return np.asarray(bx)
 
 
 def main():
     wind, wave = synthetic_grids(storm=True)
-    grids = jm.DeviceGrids(wind, wave)
+    grids = Grids.from_era5(wind, wave)
     land = _land()
     dim = 2 * (K - 2) + NSP
     x0 = op.gc_init_theta(COR, K, NSP)
 
     # Forecast-error surrogate ensemble; row 0 is the nominal (0,0,0,1,1).
-    perts = rk.perturbation_grid(
+    perts = te.perturbation_grid(
         dlat=(0.0, -0.3, 0.3), dt=(0.0, -3.0, 3.0), hs=(1.0, 1.12)
     )  # 18 members
 
-    det_cost = op.make_batched_cost(
-        grids, land, COR, L, False, op.Penalty(), K, toy_power_jax, n_speed=NSP, align_dt_h=ALIGN
-    )
-    rob_cost = rk.make_robust_cost(
+    det = op.build_fit(COR, grids, land, op.Penalty(), K, NSP, L, ALIGN, False, toy_power_jax)
+    rob = te.make_ensemble_cost(
         grids,
         land,
         COR,
-        L,
-        False,
-        K,
-        NSP,
-        ALIGN,
-        perts,
-        toy_power_jax,
+        objective="chance_constrained",
+        safety_mode="mean",
+        perturbations=perts,
+        L=L,
+        K=K,
+        n_speed=NSP,
+        align=ALIGN,
+        wps=False,
+        power_fn=toy_power_jax,
         hs_lim=HS_LIM,
-        us_lim=US_LIM,
-        aH=4.0,
-        aU=2.0,
-        lam_env=1.0,
+        tws_lim=US_LIM,
     )
 
     print("optimizing deterministic route ...")
-    det = _optimize(det_cost, x0, dim)
+    det = _optimize(*det, x0, dim)
     print("optimizing robust route ...")
-    rob = _optimize(rob_cost, x0, dim)
-
-    scorer = rk.make_scorer(grids, COR, False, toy_power_jax, align=ALIGN)
+    rob = _optimize(*rob, x0, dim)
 
     def report(name, theta):
         lat, wlon, seg = op.decode_route(theta, COR, K, L, NSP)
-        E, Hs, _ = scorer(
-            jnp.asarray(lat, jnp.float32),
-            jnp.asarray(op.working_to_signed(wlon), jnp.float32),
-            jnp.asarray(seg, jnp.float32),
-            DEP_OFF,
-            perts,
+        m = te.score_members(
+            grids,
+            COR,
+            lat,
+            wlon,
+            seg,
+            wps=False,
+            power_fn=toy_power_jax,
+            align=ALIGN,
+            hs_lim=HS_LIM,
+            tws_lim=US_LIM,
+            dep_off=DEP_OFF,
+            perturbations=perts,
         )
-        E, Hs = np.asarray(E), np.asarray(Hs)
+        E, Hs = m["energy_mwh"], m["max_hs"]
         exceed = 100.0 * float((Hs > HS_LIM).mean())
         print(f"{name:14}{E[0]:>12.1f}{Hs[0]:>13.2f}{exceed:>16.0f}%")
 
