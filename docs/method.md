@@ -22,10 +22,12 @@ profile (`n_speed` log-weights → per-segment durations summing to the fixed
 passage time, `timbers.optimizer.time_alloc`) is co-optimized *jointly with
 geometry* in stage 1. The parameterization is a strict superset of BERS:
 zero log-weights reproduce the implicit uniform-speed model exactly. This is
-the **dominant energy lever**: `n_speed` is the dominant resolution axis in
-sweep studies, and a dynamic-programming study independently shows speed
-allocation is first-order while global geometry is not. It also makes BERS's
-stage-2 FMS redundant.
+the **dominant energy lever** once the geometry is resolved: a
+dynamic-programming study independently shows speed allocation is first-order
+while global geometry is not. Which resolution axis dominates depends on the
+passage and on the starting grid. On a multi-day passage started from a coarse
+curve, refining the geometry comes first and speed second (F below). It also
+makes BERS's stage-2 FMS redundant.
 
 **B. Scorer-aligned cost integration (`align_dt_h`).** The L-point track is
 resampled to the reference scorer's uniform-time grid inside the cost, and
@@ -41,7 +43,16 @@ pressure from the hard constraint.
 
 **D. Best-of-N seed restarts.** The energy landscape is multimodal
 (north-of-storm vs south-of-storm vs GC-hugging basins); N restarts cut
-per-departure variance.
+per-departure variance. Restarts buy more than iterations: on a 354 h passage
+the best of 8 to 16 restarts varies by mostly 0.1 to 1.3% of the passage
+energy, and 900 iterations instead of 300 change the best of 24 by 0.3%. How
+reliably a restart converges depends on the objective. On a winter departure,
+the median of 24 restarts was 1.31 and 1.13 times the best for the two
+objectives in `timbers.ensemble` whose safety term reads only the nominal member
+(`deterministic`, `expected_value`), against 1.01 to 1.02 for the
+ensemble-safety objectives; on a summer departure all were within 1.01.
+When comparing formulations, use a budget at which all of them converge, or
+report the restart spread with the result.
 
 **E. Gradient local-refinement polish (supersedes FMS).** Per-waypoint lateral
 offset along the route normal + co-refined speed, gentle Adam, curvature
@@ -51,10 +62,59 @@ step that BERS's FMS represents (a naive version diverged); the original FMS
 was redundant once speed is explicit. Additive, storm-concentrated, and
 shown exhausted — a much heavier gradient stage adds a negligible increment.
 
-**F. Per-case resolution + budget.** Bézier degree (`K`), speed resolution
-(`n_speed`), population size and iteration budget are tuned per case; harder
-corridors reward finer resolution and a larger budget that a fixed resolution
-does not reach.
+**F. Per-case resolution + budget.** Bézier degree (`K`), evaluation points
+(`L`), speed resolution (`n_speed`), population size and iteration budget are
+set per case; harder corridors reward finer resolution and a larger budget that
+a fixed resolution does not reach.
+
+*Resolution for long passages.* The table is a grid sweep on a 354 h, 2,830 nm
+North Atlantic crossing by a wind-assisted ship, planned once on reanalysis
+weather (so differences come from the grid and the search, not from forecast
+error), best of 8 restarts. The reference is the same voyage re-planned daily
+on the same weather (the check below), which chains fifteen curves.
+
+| `K` | `L` | `n_speed` | vs reference | restart s.d. |
+|---:|---:|---:|---:|---:|
+| 6 | 40 | 8 | +17.5% | 18.3 MWh |
+| 10 | 60 | 8 | +4.3% | 5.8 MWh |
+| 20 | 100 | 8 | +2.1% | 4.9 MWh |
+| 20 | 100 | 32 | +0.9% | 0.8 MWh |
+| 40 | 200 | 32 | +0.9% | 6.2 MWh |
+| 40 | 200 | 64 | +2.0% | 4.1 MWh |
+| 56 | 280 | 64 | +4.3% | 10.3 MWh |
+
+Geometry comes first: 6 to 20 control points remove most of the excess, and
+from 20 to 40 the energy varies by 0.1%. Beyond about 40 the solve degrades and
+the restart spread grows, as expected for high-degree Bézier curves. Speed
+comes second: 8 to 32 weights at `K = 20` remove another 1.2 points, and 32 to
+64 narrows the gap to the re-planned voyage by a further 0.4 to 1.8 points on
+three of four departures, while 128 changes nothing. Per unit of passage, a
+starting point for multi-day voyages is one control point per about 150 nm,
+one evaluation point per about 30 nm and one speed weight per 5 to 11 h
+(`K = 20`, `L = 100`, `n_speed = 32` to `64` here), with `K` kept below about
+40. These figures come from one ship and one corridor; check them on yours.
+
+*Checking a grid.* Solve one departure twice on the verifying weather: planned
+once, and re-planned every cycle with the verifying field as the forecast. With
+nothing new to learn, the re-planned voyage differs only in representation (a
+chain of short curves instead of one), so a gap of more than a percent or two
+says the single curve is too coarse; refine `K` first, then `n_speed`.
+`timbers.replan` gives both arms; a cycle longer than the passage is one plan
+sailed to arrival:
+
+```python
+from timbers.model import Grids
+from timbers.replan import sail_with_replanning
+
+hindsight = lambda t, h: Grids.from_era5(wind, wave, t, h)  # forecast = the truth
+common = dict(objective="deterministic", power_fn=power_jax, power_fn_host=power_np,
+              hs_lim=7.0, tws_lim=20.0, K=20, L=100, n_speed=64, seeds=8)
+once = sail_with_replanning(origin, dest, hours, dep, hindsight, wind, wave, land,
+                            cycle_h=10 * hours, **common)  # one plan, sailed to arrival
+daily = sail_with_replanning(origin, dest, hours, dep, hindsight, wind, wave, land,
+                             cycle_h=24.0, **common)
+gap = once["energy_mwh"] / daily["energy_mwh"] - 1
+```
 
 ## 2. Infrastructure (enables the above at scale)
 
