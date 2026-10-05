@@ -18,10 +18,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "examples"))
 from toy_power import toy_power_jax  # noqa: E402
 
 from timbers import optimizer as op  # noqa: E402
-from timbers.era5 import load_era5  # noqa: E402
+from timbers.weather import load_era5  # noqa: E402
 from timbers.land import exclusion_raster  # noqa: E402
 from timbers.model import Grids  # noqa: E402
-from timbers.seafill import fill_from_nearest_sea  # noqa: E402
+from timbers.weather import fill_from_nearest_sea  # noqa: E402
 
 
 def _raster(mask, lat, wlon):

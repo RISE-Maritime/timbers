@@ -14,7 +14,7 @@ Usage
 -----
 ::
 
-    from timbers.era5 import load_era5
+    from timbers.weather import load_era5
     from timbers.scoring import evaluate_route
 
     wind_grid = load_era5(["wind.nc"])
@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 
 import numpy as np
 
-from .era5 import query, query_angle
+from .weather import query, query_angle
 from .geo import bearing_deg as _forward_bearing_deg
 from .geo import haversine_m as _haversine_m
 from .geo import midpoint_lon, to_grid_lon
@@ -57,7 +57,7 @@ def evaluate_route(
     Parameters
     ----------
     wind_grid, wave_grid : dict
-        Grids from :func:`timbers.era5.load_era5`.
+        Grids from :func:`timbers.weather.load_era5`.
     waypoints : list of (datetime, lat_deg, lon_deg)
         Route waypoints in chronological order.
     power_fn : callable ``(tws, twa_deg, swh, mwa_deg, v, wps) -> kW`` on NumPy arrays.
@@ -243,7 +243,7 @@ def evaluate_route_saturated(
     Parameters
     ----------
     wind_grid, wave_grid : dict
-        Grids as returned by :func:`timbers.era5.load_era5`.
+        Grids as returned by :func:`timbers.weather.load_era5`.
     dep : datetime
         Departure time.
     lat, lon : array_like, length L

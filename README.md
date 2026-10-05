@@ -88,7 +88,7 @@ backend, all on synthetic grids with the toy power model.
 
 ## Using your own problem
 
-- **Weather**: load gridded NetCDF with `timbers.era5.load_era5`, or build the
+- **Weather**: load gridded NetCDF with `timbers.weather.load_era5`, or build the
   grid dicts directly (see `examples/run_toy.py`). The device path takes them as
   `timbers.model.Grids`: `Grids.from_era5(wind, wave)` for a single field, or
   `Grids(wind, wave, steps)` for fields with a member axis.
@@ -130,7 +130,7 @@ backend, all on synthetic grids with the toy power model.
 TiMBERS bundles no data. If you use the loaders/scripts:
 
 - **ERA5** reanalysis — Copernicus Climate Change Service (C3S) / ECMWF;
-  downloaded by the user under the C3S licence (used by `timbers.era5`).
+  downloaded by the user under the C3S licence (used by `timbers.weather`).
 - **Natural Earth** land polygons — public domain (fetched by
   `scripts/download_natural_earth.py`, used by `timbers.land`).
 
