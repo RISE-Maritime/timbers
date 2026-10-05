@@ -24,6 +24,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from . import model as jm
+from .geo import midpoint_lon
 
 jax.config.update("jax_enable_x64", False)
 
@@ -172,10 +173,8 @@ def _route_cost(
         seg_dt = jnp.full((M,), cor.hours / M, lat.dtype)
     glon = working_to_signed(wlon)  # signed lon for weather
 
-    glon_w = jnp.where(glon < 0, glon + 360.0, glon) if lon_wrap else glon
-
     mid_lat = (lat[:-1] + lat[1:]) / 2
-    mid_lon = (glon_w[:-1] + glon_w[1:]) / 2
+    mid_lon = midpoint_lon(glon[:-1], glon[1:], lon_wrap)
     cum = jnp.cumsum(seg_dt)
     seg_mid_h = dep_off + cum - seg_dt / 2
     ti, tf = jm._time_index(seg_mid_h, dt_h, nt)

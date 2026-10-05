@@ -44,6 +44,7 @@ import numpy as np
 
 from . import model as jm
 from . import optimizer as op
+from .geo import midpoint_lon
 
 OBJECTIVES = ("deterministic", "chance_constrained", "expected_value", "joint")
 
@@ -283,9 +284,7 @@ def make_ensemble_cost(
         v = jm._haversine_m(rlat[:-1], glon[:-1], rlat[1:], glon[1:]) / (seg * 3600.0)
         bearing = jm._bearing_deg(rlat[:-1], glon[:-1], rlat[1:], glon[1:])
         mid_lat = (rlat[:-1] + rlat[1:]) / 2
-        # Wrap before averaging, so a segment across 180 has its midpoint at 180.
-        glon_q = jnp.where(glon < 0, glon + 360.0, glon) if lon_wrap else glon
-        mid_lon_q = (glon_q[:-1] + glon_q[1:]) / 2
+        mid_lon_q = midpoint_lon(glon[:-1], glon[1:], lon_wrap)
         ti, tf = time_index(dep_off + jnp.cumsum(seg) - seg / 2, steps)
 
         def per_member(u10m, v10m, swhm, msm, mcm):
@@ -373,8 +372,7 @@ def score_members(
     v = jm._haversine_m(rlat[:-1], glon[:-1], rlat[1:], glon[1:]) / (seg * 3600.0)
     bearing = jm._bearing_deg(rlat[:-1], glon[:-1], rlat[1:], glon[1:])
     mid_lat = (rlat[:-1] + rlat[1:]) / 2
-    glon_q = jnp.where(glon < 0, glon + 360.0, glon) if grids.lon_wrap else glon
-    mid_lon_q = (glon_q[:-1] + glon_q[1:]) / 2
+    mid_lon_q = midpoint_lon(glon[:-1], glon[1:], grids.lon_wrap)
     ti, tf = time_index(dep_off + jnp.cumsum(seg) - seg / 2, grids.steps)
 
     def one(u10m, v10m, swhm, msm, mcm):
@@ -481,8 +479,7 @@ def member_series(grids, t_h, lat, lon, *, wps, power_fn, pad_to=512):
     bearing = np.asarray(jm._bearing_deg(la0, lo0, la1, lo1))
     v = dist / (np.maximum(seg, 1e-6) * 3600.0)
     mid_lat = (lat[:-1] + lat[1:]) / 2
-    glon_q = np.where(glon < 0, glon + 360.0, glon) if grids.lon_wrap else glon
-    mid_lon_q = (glon_q[:-1] + glon_q[1:]) / 2
+    mid_lon_q = midpoint_lon(glon[:-1], glon[1:], grids.lon_wrap)
     smid = (t_h[:-1] + t_h[1:]) / 2
 
     def pad(x):

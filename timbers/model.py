@@ -20,6 +20,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from .geo import midpoint_lon
+
 jax.config.update("jax_enable_x64", False)
 
 
@@ -116,7 +118,7 @@ def route_energy(grids: DeviceGrids, lats, lons, seg_dt_h, dep_offset_h, wps: bo
     """
     lons = jnp.where(lons < 0, lons + 360.0, lons) if grids.lon_wrap else lons
     mid_lat = (lats[:-1] + lats[1:]) / 2
-    mid_lon = (lons[:-1] + lons[1:]) / 2
+    mid_lon = midpoint_lon(lons[:-1], lons[1:], grids.lon_wrap)
     cum = jnp.cumsum(seg_dt_h)
     seg_mid_h = dep_offset_h + cum - seg_dt_h / 2
 
