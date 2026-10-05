@@ -1,54 +1,46 @@
-#!/usr/bin/env python
-"""Geodesic helpers: great-circle interpolation and distance."""
+"""Spherical geometry shared by the host (NumPy) and device (JAX) paths.
+
+Each function takes the array module as ``xp`` (``numpy`` by default, or
+``jax.numpy``), so the scorer and the GPU cost use one implementation.
+"""
 
 from __future__ import annotations
 
 import numpy as np
 
-__all__ = ["great_circle_points", "gc_distance_nm", "midpoint_lon"]
+__all__ = ["haversine_m", "bearing_deg", "midpoint_lon", "to_grid_lon", "R_EARTH_M"]
 
-_R_EARTH_M = 6_371_000.0
-
-
-def _to_xyz(lat_deg, lon_deg):
-    lat, lon = np.radians(lat_deg), np.radians(lon_deg)
-    return np.array([np.cos(lat) * np.cos(lon), np.cos(lat) * np.sin(lon), np.sin(lat)])
+R_EARTH_M = 6_371_000.0
 
 
-def great_circle_points(
-    lat0: float, lon0: float, lat1: float, lon1: float, n: int
-) -> tuple[np.ndarray, np.ndarray]:
-    """Return ``n`` points along the great circle, evenly spaced in arc length.
+def haversine_m(lat1, lon1, lat2, lon2, xp=np):
+    """Great-circle distance in metres between (lat, lon) pairs in degrees."""
+    lat1r, lat2r = xp.radians(lat1), xp.radians(lat2)
+    dlat = lat2r - lat1r
+    dlon = xp.radians(lon2 - lon1)
+    a = xp.sin(dlat / 2) ** 2 + xp.cos(lat1r) * xp.cos(lat2r) * xp.sin(dlon / 2) ** 2
+    return R_EARTH_M * 2 * xp.arctan2(xp.sqrt(a), xp.sqrt(1 - a))
 
-    Includes both endpoints (so ``n`` >= 2). Uses spherical linear interpolation
-    (slerp) of the endpoint unit vectors. Returns ``(lats_deg, lons_deg)`` with
-    longitudes in [-180, 180).
+
+def bearing_deg(lat1, lon1, lat2, lon2, xp=np):
+    """Initial bearing in degrees [0, 360) from point 1 to point 2."""
+    lat1r, lat2r = xp.radians(lat1), xp.radians(lat2)
+    dlon = xp.radians(lon2 - lon1)
+    x = xp.sin(dlon) * xp.cos(lat2r)
+    y = xp.cos(lat1r) * xp.sin(lat2r) - xp.sin(lat1r) * xp.cos(lat2r) * xp.cos(dlon)
+    return xp.mod(xp.degrees(xp.arctan2(x, y)), 360.0)
+
+
+def to_grid_lon(lon, wrap: bool):
+    """Longitude in a grid's convention: [0, 360) if ``wrap``, else [-180, 180).
+
+    Arithmetic only, so it works on NumPy and JAX arrays alike.
     """
-    if n < 2:
-        raise ValueError("n must be >= 2")
-    p0 = _to_xyz(lat0, lon0)
-    p1 = _to_xyz(lat1, lon1)
-    dot = float(np.clip(np.dot(p0, p1), -1.0, 1.0))
-    omega = np.arccos(dot)
-    f = np.linspace(0.0, 1.0, n)
-    if omega < 1e-12:  # coincident endpoints
-        pts = np.outer(np.ones_like(f), p0)
-    else:
-        s0 = np.sin((1 - f) * omega) / np.sin(omega)
-        s1 = np.sin(f * omega) / np.sin(omega)
-        pts = s0[:, None] * p0[None, :] + s1[:, None] * p1[None, :]
-    lat = np.degrees(np.arcsin(np.clip(pts[:, 2], -1.0, 1.0)))
-    lon = np.degrees(np.arctan2(pts[:, 1], pts[:, 0]))
-    lon = (lon + 180.0) % 360.0 - 180.0
-    return lat, lon
-
-
-def gc_distance_nm(lat0: float, lon0: float, lat1: float, lon1: float) -> float:
-    """Great-circle distance in nautical miles."""
-    p0 = _to_xyz(lat0, lon0)
-    p1 = _to_xyz(lat1, lon1)
-    omega = np.arccos(float(np.clip(np.dot(p0, p1), -1.0, 1.0)))
-    return omega * _R_EARTH_M / 1852.0
+    if not wrap:
+        lon = lon + 180.0
+    m = lon % 360.0
+    m = m - 360.0 * (m >= 360.0)  # a tiny negative input rounds to exactly 360.0
+    return m if wrap else m - 180.0
 
 
 def midpoint_lon(lon_a, lon_b, wrap: bool):
@@ -64,9 +56,4 @@ def midpoint_lon(lon_a, lon_b, wrap: bool):
     and JAX arrays alike.
     """
     d = (lon_b - lon_a + 180.0) % 360.0 - 180.0
-    mid = lon_a + d / 2
-    if not wrap:
-        mid = mid + 180.0
-    m = mid % 360.0
-    m = m - 360.0 * (m >= 360.0)  # a tiny negative mid rounds to exactly 360.0
-    return m if wrap else m - 180.0
+    return to_grid_lon(lon_a + d / 2, wrap)

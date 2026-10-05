@@ -18,7 +18,6 @@ import jax.numpy as jnp
 import numpy as np
 
 from . import cmaes as jc
-from . import fitness as jrf
 from . import optimizer as op
 from . import polish as pol
 from .scoring import evaluate_route_full
@@ -95,15 +94,15 @@ def solve_corridor(
     """
     chunk = chunk or auto_chunk(cor, popsize, ALIGN)
     dim = 2 * (K - 2) + NSP
-    fit, x0, shared = jrf.build_fit(cor, grids, land, pen, K, NSP, L, ALIGN, wps, power_fn)
+    fit, shared = op.build_fit(cor, grids, land, pen, K, NSP, L, ALIGN, wps, power_fn)
+    x0 = jnp.asarray(op.gc_init_theta(cor, K, NSP), jnp.float32)
     hp = jc.hyperparams(dim, popsize)
     solve = jc.make_solver(fit, x0, sigma0, hp, popsize, maxiter)
 
     D = len(deps)
-    dep_offs = np.array(
-        [float((np.datetime64(dp) - wind["t0"]) / np.timedelta64(1, "h")) for dp in deps],
-        np.float32,
-    )
+    # Offsets on the device grids' own clock: grids cut to a window (from_era5
+    # with start) do not start at the host grid's t0.
+    dep_offs = np.array([grids.hours_after_t0(dp) for dp in deps], np.float32)
     B = D * n_seeds
     dep_offs_B = np.repeat(dep_offs, n_seeds)  # (B,)
     keys = jax.random.split(jax.random.PRNGKey(base_seed), B)  # (B,2)

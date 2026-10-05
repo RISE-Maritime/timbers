@@ -85,19 +85,22 @@ These bound the search space:
 
 ## 4. Risk-aware extension (beyond BERS's deterministic scope)
 
-`timbers.risk` treats forecast error as a perturbation ensemble over the
-weather sampling (spatial shift, temporal shift, amplitude scale) with the
-route held fixed:
+`timbers.ensemble` can treat forecast error as a perturbation ensemble over the
+weather sampling (spatial shift, temporal shift, amplitude scale; rows from
+`perturbation_grid`, passed as `perturbations`) with the route held fixed. Every
+perturbation becomes an ensemble member, so the same scorers and objectives
+serve a surrogate and a real forecast ensemble:
 
-- **Perturbation-fragility** (`make_scorer`): re-score a fixed route under
+- **Perturbation-fragility** (`score_members`): re-score a fixed route under
   jittered weather, GPU-batched. Finding: routes optimized to ride just below
   the wave-height limit on a single reanalysis are fragile — they violate the
   limit with high probability under modest forecast error on storm departures.
-- **Chance-constrained objective** (`make_robust_cost`): minimize *nominal*
-  energy + ensemble-mean exceedance from the *hard* limit, so the safety
-  buffer is set by the surrogate's local spread rather than a hand-tuned
-  `hs_soft`. A real, tunable risk control where `hs_soft` is degenerate
-  (trading a lower violation probability for some energy).
+- **Robust objective** (`make_ensemble_cost`, `objective="chance_constrained"`,
+  `safety_mode="mean"`): minimize *nominal* energy + the ensemble-mean
+  exceedance penalty, so the safety buffer is set by the surrogate's local
+  spread rather than a hand-tuned `hs_soft`. A real, tunable risk control where
+  `hs_soft` is degenerate (trading a lower violation probability for some
+  energy). The other safety modes (breach probability, CVaR) apply unchanged.
 
 **Validity limit of the surrogate, measured.** The shift/scale surrogate was
 compared against real ECMWF ENS (51 members, along-route Hs, two North Atlantic
@@ -114,18 +117,18 @@ perturbing one field.
 
 This reframes deterministic-routing spread as **method vs risk-appetite**.
 `examples/run_risk.py` makes it concrete: it optimizes a deterministic and a
-chance-constrained route for the same toy storm departure, then scores both
+robust route for the same toy storm departure, then scores both
 across an 18-member forecast-error surrogate ensemble (spatial ±0.3°, temporal
 ±3 h, Hs ×1.12) and reports the fraction whose max Hs crosses the 7 m limit:
 
 ```
 route              nom MWh    nom maxHs   Hs>limit (ensemble)
-deterministic       7869.7        4.29 m              17%
-robust              9170.0        2.96 m               0%
+deterministic       7869.3        4.29 m              17%
+robust              8899.2        3.14 m               0%
 ```
 
 The deterministic route is cheapest yet infeasible in ~1 in 6 perturbed
-forecasts; the chance-constrained route eliminates that for a ~16% nominal-energy
+forecasts; the robust route eliminates that for a ~13% nominal-energy
 premium — the safety buffer emerging from the local forecast spread rather than a
 hand-tuned margin. Same caveat as §5: toy power model on a constructed scenario,
 so the magnitudes are illustrative of the mechanism, not real-vessel numbers.

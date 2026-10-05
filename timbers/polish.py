@@ -42,31 +42,29 @@ def make_polisher(
     ``power_fn_host`` is the NumPy power model used by the host scorer that picks
     the best scored-feasible iterate."""
     n_geo = 2 * (K - 2)
-    dargs = (grids.dt_h, grids.nt, grids.lon_wrap)
-    FIELDS = (grids.u10, grids.v10, grids.swh, grids.mwd_sin, grids.mwd_cos)
-    AXES = (grids.wlat, grids.wlon, grids.slat, grids.slon)
-    LAND = (land.mask, land.lat, land.wlon)
+    FIELDS, AXES, LAND = grids.fields, grids.axes, land.arrays
+    lon_wrap = grids.lon_wrap
     end_mask = jnp.ones(L).at[0].set(0.0).at[-1].set(0.0)
 
     def cost(p, dep_off, P0, normals, fields, axes, land_arrs):
         d = p[:L] * end_mask
         seg_dt = op.time_alloc(p[L:], cor.hours, L, NSP)
         P = P0 + d[:, None] * normals
+        lat, wlon = cor.denorm(P[:, 0], P[:, 1])
         c, *_ = op._route_cost(
             fields,
             axes,
             land_arrs,
             cor,
-            *dargs,
-            P[:, 0],
-            P[:, 1],
+            lat,
+            wlon,
             seg_dt,
             dep_off,
-            L,
             wps,
             pen,
             power_fn,
             ALIGN,
+            lon_wrap,
         )
         curv = d[2:] - 2 * d[1:-1] + d[:-2]
         return c + lam_s * jnp.sum(curv**2)

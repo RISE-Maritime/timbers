@@ -1,9 +1,10 @@
-"""Route optimisation and scoring over a forecast ensemble.
+"""Route optimisation and scoring under weather uncertainty.
 
-Where :mod:`timbers.risk` builds a surrogate ensemble by perturbing one weather
-field, this module works with a real one: fields with a member axis, such as the
-51 members of ECMWF ENS. One route cost serves four objectives that differ only
-in how the per-member outcomes are reduced to a scalar:
+The weather comes as an ensemble: the members of a real forecast (such as the 51
+members of ECMWF ENS, a :class:`timbers.model.Grids` with a member axis), or a
+surrogate ensemble built by perturbing one field (``perturbations``, see below),
+or both. One route cost serves four objectives that differ only in how the
+per-member outcomes are reduced to a scalar:
 
     ==================  =======================  =========================
                         safety from member 0     safety over all members
@@ -12,20 +13,39 @@ in how the per-member outcomes are reduced to a scalar:
     cost, member mean   ``expected_value``       ``joint``
     ==================  =======================  =========================
 
-Member 0 is the nominal member (the control forecast in ENS). Parameterisation,
-resampling, interpolation, power model and land penalty are shared, so a
-difference between objectives is a difference in formulation.
+Member 0 is the nominal member (the control forecast in ENS, or the unperturbed
+row of a perturbation grid). Parameterisation, resampling, interpolation, power
+model and land penalty are shared, so a difference between objectives is a
+difference in formulation.
 
 The expectation is taken over per-member costs, not over the weather field:
 power is convex in wave height, so averaging the weather first would understate
 the cost of exactly the storm cases an ensemble is meant to represent.
 
-Forecast steps need not be uniform (ENS is 3-hourly to 144 h, then 6-hourly);
-time interpolation searches the actual step vector.
+**Perturbation surrogate.** Without a real ensemble, forecast error can be
+approximated by perturbing where, when and how strongly one field is read:
+``perturbation_grid`` builds rows ``(dlat, dlon, dt_h, hs_scale, wind_scale)``,
+and passing them as ``perturbations`` makes every (perturbation, member) pair a
+member, perturbation-major, so row 0 of a single-member grid is member 0. The
+route's own geometry and speed are not perturbed. ``score_members`` then gives
+a fixed route's fragility, and ``safety_mode="mean"`` the expected exceedance
+penalty over the surrogate.
+
+**Validity domain of the shift/scale surrogate.** Measured against real ECMWF
+ENS (51 members, along-route Hs, two North Atlantic storm departures), the
+surrogate approximately matches real ensemble spread out to about two days of
+lead time (spread ratio 0.75-0.97 at 12-72 h) and understates it beyond:
+1.45-1.89x at 72-144 h, 2.4-6.2x at 144-366 h. The mismatch is structural
+rather than a tuning issue. Real forecast spread grows with lead time, while
+the surrogate's tracks the amplitude of the one field being perturbed, and the
+real member distribution is right-skewed (skew 0.4-1.4), which a symmetric
+shift and scale cannot produce. Use the surrogate as a mechanism demonstration
+or for horizons within about two days. For longer passages, score against real
+ensemble members instead.
 
 Typical use::
 
-    grids = EnsembleGrids(wind, wave, steps)          # fields (member, time, y, x)
+    grids = Grids(wind, wave, steps)                  # fields (member, time, y, x)
     fit, shared = make_ensemble_cost(grids, land, cor, objective="joint", ...)
     best, best_j = cmaes.run(x0, fit, 0.1, hp, pop, iters, key,
                              (jnp.float32(dep_off), *shared))
@@ -35,7 +55,7 @@ Typical use::
 
 from __future__ import annotations
 
-import math
+import itertools
 from functools import partial
 
 import jax
@@ -44,96 +64,30 @@ import numpy as np
 
 from . import model as jm
 from . import optimizer as op
-from .geo import midpoint_lon
 
 OBJECTIVES = ("deterministic", "chance_constrained", "expected_value", "joint")
+SAFETY_MODES = ("prob", "cvar", "mean")
 
 
-class EnsembleGrids:
-    """Device-resident weather fields with a member axis.
+def perturbation_grid(dlat=(0.0,), dlon=(0.0,), dt=(0.0,), hs=(1.0,), wind=(1.0,)):
+    """Cartesian product of perturbation axes -> ``(Pn, 5)`` float32 rows
+    ``(dlat, dlon, dt_h, hs_scale, wind_scale)``.
 
-    The ensemble counterpart of :class:`timbers.model.DeviceGrids`: every field
-    is ``(member, time, lat, lon)`` and the time axis is given by ``steps``, the
-    lead time of each slice in hours since the forecast's base time, which may
-    be non-uniform. ``wind`` holds ``u10``, ``v10``, ``lat``, ``lon``; ``wave``
-    holds ``swh``, ``mwd`` (degrees), ``lat``, ``lon``. Wind and wave may be on
-    different spatial grids.
-
-    ``consume=True`` removes the field arrays from ``wind`` and ``wave`` as they
-    are moved to the device, which roughly halves peak host memory for a large
-    ensemble; it is off by default because it empties the caller's dicts.
-
-    Fields must be finite. Land-masked wave cells are typically NaN in decoded
-    GRIB; fill them first, for example with
-    :func:`timbers.seafill.fill_from_nearest_sea`. A NaN objective would not
-    raise inside the optimizer: the candidate would be silently ranked out.
+    With the nominal value first on every axis (the defaults), row 0 is the
+    unperturbed field.
     """
-
-    def __init__(self, wind: dict, wave: dict, steps, consume: bool = False):
-        take = (lambda d, k: d.pop(k)) if consume else (lambda d, k: d[k])
-        self.steps = jnp.asarray(np.asarray(steps, np.float32))
-        self.wlat = jnp.asarray(wind["lat"], jnp.float32)
-        self.wlon = jnp.asarray(wind["lon"], jnp.float32)
-        self.slat = jnp.asarray(wave["lat"], jnp.float32)
-        self.slon = jnp.asarray(wave["lon"], jnp.float32)
-        self.u10 = jnp.asarray(take(wind, "u10"), jnp.float32)
-        self.v10 = jnp.asarray(take(wind, "v10"), jnp.float32)
-        self.swh = jnp.asarray(take(wave, "swh"), jnp.float32)
-        # Direction as sine and cosine so interpolation does not wrap at 360.
-        # Computed in float32 one array at a time to bound host memory.
-        mwd = np.radians(np.asarray(take(wave, "mwd")).astype(np.float32, copy=False))
-        self.mwd_sin = jnp.asarray(np.sin(mwd, dtype=np.float32))
-        self.mwd_cos = jnp.asarray(np.cos(mwd, dtype=np.float32))
-        del mwd
-        for name, arr in (
-            ("u10", self.u10),
-            ("v10", self.v10),
-            ("swh", self.swh),
-            ("mwd_sin", self.mwd_sin),
-            ("mwd_cos", self.mwd_cos),
-        ):
-            if not bool(jnp.all(jnp.isfinite(arr))):
-                n = int(jnp.sum(~jnp.isfinite(arr)))
-                raise ValueError(
-                    f"{name} has {n:,} non-finite values; fill land-masked "
-                    "cells before use (timbers.seafill)"
-                )
-        self.n_members = self.u10.shape[0]
-        self.nt = self.u10.shape[1]
-        self.lon_wrap = bool(np.asarray(wind["lon"])[0] >= 0 and np.asarray(wind["lon"])[-1] > 180)
+    return np.array(list(itertools.product(dlat, dlon, dt, hs, wind)), np.float32)
 
 
-def as_ensemble(wind: dict, wave: dict, start, hours: float) -> EnsembleGrids:
-    """A single gridded field as a one-member :class:`EnsembleGrids`.
-
-    ``wind`` and ``wave`` are grids as returned by :func:`timbers.era5.load_era5`
-    (uniform ``dt_h``). The result starts at ``start`` (a datetime) and covers
-    ``hours``, so a route can be optimised on known weather (for example ERA5,
-    to obtain a perfect-information solution) with the same cost and scoring
-    code as a forecast ensemble. ``start`` must fall on a time step of both
-    grids, and both must cover ``start + hours``; otherwise ``ValueError``.
-    """
-    t0 = np.datetime64(start.replace(tzinfo=None), "s")
-    out = {}
-    for name, g, keys in (("wind", wind, ("u10", "v10")), ("wave", wave, ("swh", "mwd"))):
-        dt = float(g["dt_h"])
-        off = float((t0 - g["t0"]) / np.timedelta64(1, "h")) / dt
-        i0 = int(round(off))
-        if abs(off - i0) > 1e-6:
-            raise ValueError(f"{start} is not on a time step of the {name} grid")
-        if i0 < 0:
-            raise ValueError(f"{name} grid starts after {start}")
-        n = int(hours / dt) + 3
-        out[name] = {k: np.asarray(g[k][i0 : i0 + n])[None] for k in keys}
-        if out[name][keys[0]].shape[1] < math.ceil(hours / dt) + 1:
-            raise ValueError(f"{name} grid ends before {start} + {hours} h")
-        out[name]["lat"], out[name]["lon"] = g["lat"], g["lon"]
-    n = min(out["wind"]["u10"].shape[1], out["wave"]["swh"].shape[1])
-    for side, keys in (("wind", ("u10", "v10")), ("wave", ("swh", "mwd"))):
-        for k in keys:
-            out[side][k] = out[side][k][:, :n]
-    steps = np.arange(n, dtype=np.float32) * float(wind["dt_h"])
-    return EnsembleGrids(out["wind"], out["wave"], steps)
+def _members(fields, axes, segs, power_fn, wps, lon_wrap, perturbations):
+    """Power, Hs and TWS ``(member, segment)``; with ``perturbations`` every
+    (perturbation, grid member) pair is a member, perturbation-major."""
+    if perturbations is None:
+        return jm.sample(fields, axes, segs, power_fn, wps, lon_wrap)
+    out = jax.vmap(lambda pt: jm.sample(fields, axes, segs, power_fn, wps, lon_wrap, pt))(
+        jnp.asarray(perturbations, jnp.float32)
+    )
+    return tuple(x.reshape(-1, x.shape[-1]) for x in out)
 
 
 # --- building blocks ----------------------------------------------------------
@@ -149,27 +103,6 @@ def _sexp(x):
     """exp(x) below the knee, linear continuation above; continuous slope."""
     lo = jnp.exp(jnp.minimum(x, _KNEE))
     return jnp.where(x <= _KNEE, lo, _KNEE_VAL * (1.0 + (x - _KNEE)))
-
-
-# The number of integration points M fixes array shapes. Snapping it to a
-# geometric ladder bounds the number of distinct compiled kernels when the same
-# cost is built for many passages of different length (as in re-planning, where
-# the remaining time shrinks every cycle), so the compilation cache is reused
-# instead of growing. The step lands within sqrt(1.5) of the requested ``align``.
-_M_LADDER = (32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536)
-
-
-def _quantised_M(hours, align):
-    m = hours / align
-    return min(_M_LADDER, key=lambda c: abs(math.log(c / m)))
-
-
-def time_index(hours, steps):
-    """Bracketing index and fraction of ``hours`` on an ascending step vector."""
-    nt = steps.shape[0]
-    ti = jnp.clip(jnp.searchsorted(steps, hours, side="right") - 1, 0, nt - 2)
-    t0, t1 = steps[ti], steps[ti + 1]
-    return ti, jnp.clip((hours - t0) / jnp.maximum(t1 - t0, 1e-6), 0.0, 1.0)
 
 
 def _cvar(x, eps):
@@ -205,14 +138,15 @@ def make_ensemble_cost(
     soft_frac=0.93,
     safety_mode="prob",
     sharpness=50.0,
+    perturbations=None,
 ):
     """Return ``(fit, shared)`` for :func:`timbers.cmaes.run`.
 
     ``fit(theta_batch, cargs)`` with ``cargs = (dep_off, *shared)``, where
-    ``dep_off`` is the departure time in hours after the ensemble's base time.
-    The fields travel in ``shared`` rather than being closed over, so they are
-    not baked into the compiled generation loop as constants (which would hold
-    them in device memory twice).
+    ``dep_off`` is the departure time in hours after the grids' ``t0``. The
+    fields travel in ``shared`` rather than being closed over, so they are not
+    baked into the compiled generation loop as constants (which would hold them
+    in device memory twice).
 
     The route is resampled to a uniform time grid of about ``align`` hours, as
     the scorer integrates, so the optimised quantity is the scored one. For each
@@ -223,16 +157,20 @@ def make_ensemble_cost(
 
     * cost: member 0's energy, or the member mean (``expected_value``,
       ``joint``);
-    * safety: member 0's soft penalty, or an ensemble constraint
-      (``chance_constrained``, ``joint``) penalising the exceedance of ``eps``.
+    * safety: member 0's soft penalty, or an ensemble term (``chance_constrained``,
+      ``joint``) chosen by ``safety_mode``.
 
-    ``safety_mode`` selects the ensemble constraint. ``"prob"`` (default)
-    constrains the smoothed fraction of members that breach a limit, so ``eps``
-    is the violation probability. ``"cvar"`` constrains the CVaR at level
-    ``1 - eps`` of the member margins, the standard convex relaxation; it bounds
-    the violation probability only when it is satisfied, and where the
-    constraint is infeasible it measures tail severity rather than frequency.
-    ``eps`` is resolved only to ``1 / n_members``.
+    ``safety_mode="prob"`` (default) constrains the smoothed fraction of members
+    that breach a limit, so ``eps`` is the violation probability. ``"cvar"``
+    constrains the CVaR at level ``1 - eps`` of the member margins, the standard
+    convex relaxation; it bounds the violation probability only when it is
+    satisfied, and where the constraint is infeasible it measures tail severity
+    rather than frequency. ``eps`` is resolved only to ``1 / n_members``.
+    ``"mean"`` is the members' mean soft penalty, the expected exceedance; it
+    has no ``eps``.
+
+    ``perturbations`` (rows from :func:`perturbation_grid`) multiplies the
+    members by a forecast-error surrogate; see the module docstring.
 
     Shaft power enters only the soft penalty, never the seakeeping margin: a
     power excess makes a voyage slow, not unsafe, and is better represented as
@@ -244,16 +182,12 @@ def make_ensemble_cost(
     """
     if objective not in OBJECTIVES:
         raise ValueError(f"unknown objective {objective!r}; one of {OBJECTIVES}")
-    if safety_mode not in ("prob", "cvar"):
-        raise ValueError(f"unknown safety_mode {safety_mode!r}")
+    if safety_mode not in SAFETY_MODES:
+        raise ValueError(f"unknown safety_mode {safety_mode!r}; one of {SAFETY_MODES}")
     use_ensemble_cost = objective in ("expected_value", "joint")
     use_ensemble_safety = objective in ("chance_constrained", "joint")
 
-    o_n = jnp.asarray(cor.norm(cor.o_lat, cor.o_wlon), jnp.float32)
-    d_n = jnp.asarray(cor.norm(cor.d_lat, cor.d_wlon), jnp.float32)
-    rr = jnp.linspace(0.0, 1.0, L, dtype=jnp.float32)
-    n_geo = 2 * (K - 2)
-    M = _quantised_M(cor.hours, align)
+    M = jm.n_points(cor.hours, align, quantise=True)
     # The penalties are sums over the M points while energy is time-weighted;
     # rescaling by the M the requested align implies keeps the penalty weight
     # independent of where M lands on the ladder.
@@ -261,79 +195,44 @@ def make_ensemble_cost(
     lon_wrap = grids.lon_wrap
     finite_p = bool(np.isfinite(p_lim))
 
-    fields = (grids.u10, grids.v10, grids.swh, grids.mwd_sin, grids.mwd_cos)
-    axes = (grids.wlat, grids.wlon, grids.slat, grids.slon, grids.steps)
-    land_arrs = (land.mask, land.lat, land.wlon)
-
     def one(theta, dep_off, fields, axes, land_arrs):
-        wlat, wlon_ax, slat, slon, steps = axes
-        lmask, llat, lwlon = land_arrs
-        interior = theta[:n_geo].reshape(K - 2, 2)
-        ctrl = jnp.concatenate([o_n[None, :], interior, d_n[None, :]], axis=0)
-        pts = op.bezier(ctrl, rr)
-        seg_dt0 = op.time_alloc(theta[n_geo:], cor.hours, L, n_speed)
-        lat, wlon = cor.denorm(pts[:, 0], pts[:, 1])
+        lat, wlon, seg_dt = op.theta_to_track(theta, cor, K, L, n_speed)
+        rlat, rlon, seg = jm.resample(lat, wlon, seg_dt, cor.hours, M)
+        segs = jm.segments(rlat, rlon, seg, dep_off)
+        p, swh, tws = _members(fields, axes, segs, power_fn, wps, lon_wrap, perturbations)
 
-        t_cum = jnp.concatenate([jnp.zeros(1, lat.dtype), jnp.cumsum(seg_dt0)])
-        tau = jnp.linspace(0.0, cor.hours, M + 1).astype(lat.dtype)
-        rlat = jnp.interp(tau, t_cum, lat)
-        rlon = jnp.interp(tau, t_cum, wlon)
-        seg = jnp.full((M,), cor.hours / M, lat.dtype)
+        energies = jnp.sum(p * seg, axis=-1) / 1000.0
+        margins = jnp.maximum(jnp.max(swh, -1) / hs_lim, jnp.max(tws, -1) / tws_lim) - 1.0
+        terms = (
+            _sexp(a_env * jnp.maximum(swh / (soft_frac * hs_lim) - 1.0, 0.0))
+            + _sexp(a_env * jnp.maximum(tws / (soft_frac * tws_lim) - 1.0, 0.0))
+            - 2.0
+        )
+        if finite_p:
+            terms = terms + _sexp(a_env * jnp.maximum(p / (soft_frac * p_lim) - 1.0, 0.0)) - 1.0
+        softs = pen_scale * jnp.sum(terms, axis=-1)
 
-        glon = op.working_to_signed(rlon)
-        v = jm._haversine_m(rlat[:-1], glon[:-1], rlat[1:], glon[1:]) / (seg * 3600.0)
-        bearing = jm._bearing_deg(rlat[:-1], glon[:-1], rlat[1:], glon[1:])
-        mid_lat = (rlat[:-1] + rlat[1:]) / 2
-        mid_lon_q = midpoint_lon(glon[:-1], glon[1:], lon_wrap)
-        ti, tf = time_index(dep_off + jnp.cumsum(seg) - seg / 2, steps)
-
-        def per_member(u10m, v10m, swhm, msm, mcm):
-            nt = u10m.shape[0]
-            u10 = jm._interp(u10m, wlat, wlon_ax, mid_lat, mid_lon_q, ti, tf, nt)
-            v10 = jm._interp(v10m, wlat, wlon_ax, mid_lat, mid_lon_q, ti, tf, nt)
-            swh = jm._interp(swhm, slat, slon, mid_lat, mid_lon_q, ti, tf, nt)
-            ms = jm._interp(msm, slat, slon, mid_lat, mid_lon_q, ti, tf, nt)
-            mc = jm._interp(mcm, slat, slon, mid_lat, mid_lon_q, ti, tf, nt)
-            mwd = jnp.mod(jnp.degrees(jnp.arctan2(ms, mc)), 360.0)
-            tws = jnp.sqrt(u10**2 + v10**2)
-            wind_from = jnp.mod(180.0 + jnp.degrees(jnp.arctan2(u10, v10)), 360.0)
-            p = power_fn(
-                tws, jnp.mod(wind_from - bearing, 360.0), swh, jnp.mod(mwd - bearing, 360.0), v, wps
-            )
-            energy = jnp.sum(p * seg) / 1000.0
-            margin = jnp.max(jnp.stack([swh / hs_lim, tws / tws_lim])) - 1.0
-            terms = (
-                _sexp(a_env * jnp.maximum(swh / (soft_frac * hs_lim) - 1.0, 0.0))
-                + _sexp(a_env * jnp.maximum(tws / (soft_frac * tws_lim) - 1.0, 0.0))
-                - 2.0
-            )
-            if finite_p:
-                terms = terms + _sexp(a_env * jnp.maximum(p / (soft_frac * p_lim) - 1.0, 0.0)) - 1.0
-            return energy, margin, pen_scale * jnp.sum(terms)
-
-        energies, margins, softs = jax.vmap(per_member)(*fields)
         cost = jnp.mean(energies) if use_ensemble_cost else energies[0]
-        if use_ensemble_safety:
+        if not use_ensemble_safety:
+            risk = softs[0]
+        elif safety_mode == "mean":
+            risk = jnp.mean(softs)
+        else:
             if safety_mode == "cvar":
                 excess = jnp.maximum(_cvar(margins, eps), 0.0)
             else:
                 excess = jnp.maximum(_p_hat(margins, sharpness) - eps, 0.0)
             risk = _sexp(a_env * excess) - 1.0
-        else:
-            risk = softs[0]
-        # The end points are the fixed ports, the same for every candidate; a
-        # port touching the raster would only add a constant that, in float32,
-        # rounds away small energy differences.
-        p_land = pen_scale * jnp.sum(op._sample_mask(lmask, llat, lwlon, rlat[1:-1], rlon[1:-1]))
+        p_land = pen_scale * op.land_term(land_arrs, rlat, rlon)
         return cost + lam_env * risk + lam_land * p_land
 
     batched = jax.jit(jax.vmap(one, in_axes=(0, None, None, None, None)))
 
     def fit(theta_batch, cargs):
-        dep_off, f, a, la = cargs
-        return batched(theta_batch, dep_off, f, a, la)
+        dep_off, fields, axes, land_arrs = cargs
+        return batched(theta_batch, dep_off, fields, axes, land_arrs)
 
-    return fit, (fields, axes, land_arrs)
+    return fit, (grids.fields, grids.axes, land.arrays)
 
 
 def score_members(
@@ -350,6 +249,7 @@ def score_members(
     tws_lim,
     p_lim=float("inf"),
     dep_off=0.0,
+    perturbations=None,
 ):
     """Per-member outcomes of a fixed route, sampled as the cost samples it.
 
@@ -358,108 +258,42 @@ def score_members(
     ``energy_mwh``, ``max_hs``, ``max_tws``, ``max_power``, ``margin`` (worst
     normalised Hs/TWS margin; positive means a breach) and ``power_margin``.
     ``(margin > 0).mean()`` is the ensemble's breach probability for the route.
+    With ``perturbations``, members are (perturbation, grid member) pairs as in
+    :func:`make_ensemble_cost`, which makes this the route's fragility under the
+    surrogate.
     """
-    lat = jnp.asarray(lat, jnp.float32)
-    wlon = jnp.asarray(wlon, jnp.float32)
-    seg_dt = jnp.asarray(seg_dt, jnp.float32)
-    M = _quantised_M(cor.hours, align)
-    t_cum = jnp.concatenate([jnp.zeros(1, lat.dtype), jnp.cumsum(seg_dt)])
-    tau = jnp.linspace(0.0, cor.hours, M + 1).astype(lat.dtype)
-    rlat = jnp.interp(tau, t_cum, lat)
-    rlon = jnp.interp(tau, t_cum, wlon)
-    seg = jnp.full((M,), cor.hours / M, lat.dtype)
-    glon = op.working_to_signed(rlon)
-    v = jm._haversine_m(rlat[:-1], glon[:-1], rlat[1:], glon[1:]) / (seg * 3600.0)
-    bearing = jm._bearing_deg(rlat[:-1], glon[:-1], rlat[1:], glon[1:])
-    mid_lat = (rlat[:-1] + rlat[1:]) / 2
-    mid_lon_q = midpoint_lon(glon[:-1], glon[1:], grids.lon_wrap)
-    ti, tf = time_index(dep_off + jnp.cumsum(seg) - seg / 2, grids.steps)
+    M = jm.n_points(cor.hours, align, quantise=True)
 
-    def one(u10m, v10m, swhm, msm, mcm):
-        nt = u10m.shape[0]
-        u10 = jm._interp(u10m, grids.wlat, grids.wlon, mid_lat, mid_lon_q, ti, tf, nt)
-        v10 = jm._interp(v10m, grids.wlat, grids.wlon, mid_lat, mid_lon_q, ti, tf, nt)
-        swh = jm._interp(swhm, grids.slat, grids.slon, mid_lat, mid_lon_q, ti, tf, nt)
-        ms = jm._interp(msm, grids.slat, grids.slon, mid_lat, mid_lon_q, ti, tf, nt)
-        mc = jm._interp(mcm, grids.slat, grids.slon, mid_lat, mid_lon_q, ti, tf, nt)
-        mwd = jnp.mod(jnp.degrees(jnp.arctan2(ms, mc)), 360.0)
-        tws = jnp.sqrt(u10**2 + v10**2)
-        wind_from = jnp.mod(180.0 + jnp.degrees(jnp.arctan2(u10, v10)), 360.0)
-        p = power_fn(
-            tws, jnp.mod(wind_from - bearing, 360.0), swh, jnp.mod(mwd - bearing, 360.0), v, wps
-        )
-        return jnp.stack(
-            [
-                jnp.sum(p * seg) / 1000.0,
-                jnp.max(swh),
-                jnp.max(tws),
-                jnp.max(p),
-                jnp.max(jnp.stack([swh / hs_lim, tws / tws_lim])) - 1.0,
-                jnp.max(p) / p_lim - 1.0,
-            ]
+    @jax.jit
+    def run(lat, wlon, seg_dt, dep_off, fields, axes):
+        rlat, rlon, seg = jm.resample(lat, wlon, seg_dt, cor.hours, M)
+        segs = jm.segments(rlat, rlon, seg, dep_off)
+        p, swh, tws = _members(fields, axes, segs, power_fn, wps, grids.lon_wrap, perturbations)
+        max_hs, max_tws, max_p = jnp.max(swh, -1), jnp.max(tws, -1), jnp.max(p, -1)
+        return (
+            jnp.sum(p * seg, axis=-1) / 1000.0,
+            max_hs,
+            max_tws,
+            max_p,
+            jnp.maximum(max_hs / hs_lim, max_tws / tws_lim) - 1.0,
+            max_p / p_lim - 1.0,
         )
 
-    out = jax.jit(jax.vmap(one))(grids.u10, grids.v10, grids.swh, grids.mwd_sin, grids.mwd_cos)
-    return dict(
-        energy_mwh=np.asarray(out[:, 0]),
-        max_hs=np.asarray(out[:, 1]),
-        max_tws=np.asarray(out[:, 2]),
-        max_power=np.asarray(out[:, 3]),
-        margin=np.asarray(out[:, 4]),
-        power_margin=np.asarray(out[:, 5]),
-    )
-
-
-@partial(jax.jit, static_argnames=("power_fn", "wps"))
-def _series_core(
-    u10f,
-    v10f,
-    swhf,
-    msf,
-    mcf,
-    wlat,
-    wlon,
-    slat,
-    slon,
-    steps,
-    mid_lat,
-    mid_lon_q,
-    bearing,
-    v,
-    smid,
-    *,
-    power_fn,
-    wps,
-):
-    ti, tf = time_index(smid, steps)
-
-    def one(u10m, v10m, swhm, msm, mcm):
-        nt = u10m.shape[0]
-        u10 = jm._interp(u10m, wlat, wlon, mid_lat, mid_lon_q, ti, tf, nt)
-        v10 = jm._interp(v10m, wlat, wlon, mid_lat, mid_lon_q, ti, tf, nt)
-        swh = jm._interp(swhm, slat, slon, mid_lat, mid_lon_q, ti, tf, nt)
-        ms = jm._interp(msm, slat, slon, mid_lat, mid_lon_q, ti, tf, nt)
-        mc = jm._interp(mcm, slat, slon, mid_lat, mid_lon_q, ti, tf, nt)
-        mwd = jnp.mod(jnp.degrees(jnp.arctan2(ms, mc)), 360.0)
-        tws = jnp.sqrt(u10**2 + v10**2)
-        wind_from = jnp.mod(180.0 + jnp.degrees(jnp.arctan2(u10, v10)), 360.0)
-        p = power_fn(
-            tws, jnp.mod(wind_from - bearing, 360.0), swh, jnp.mod(mwd - bearing, 360.0), v, wps
-        )
-        return jnp.stack([p, swh, tws])
-
-    return jax.vmap(one)(u10f, v10f, swhf, msf, mcf)
+    f32 = lambda x: jnp.asarray(x, jnp.float32)  # noqa: E731
+    out = run(f32(lat), f32(wlon), f32(seg_dt), f32(dep_off), grids.fields, grids.axes)
+    keys = ("energy_mwh", "max_hs", "max_tws", "max_power", "margin", "power_margin")
+    return {k: np.asarray(v) for k, v in zip(keys, out)}
 
 
 def member_series(grids, t_h, lat, lon, *, wps, power_fn, pad_to=512):
     """Per-member, per-segment weather and power along a timed track.
 
-    ``t_h`` is hours since the ensemble's base time and ``lon`` is signed; the
-    track is evaluated segment by segment as given, without resampling, so the
-    result can be aggregated over any window (for example by voyage day).
-    Several tracks can be evaluated in one call by concatenating them and
-    discarding the joining segments. The segment count is padded to a multiple
-    of ``pad_to`` so one compiled kernel serves tracks of similar length.
+    ``t_h`` is hours since the grids' ``t0`` and ``lon`` is signed; the track is
+    evaluated segment by segment as given, without resampling, so the result can
+    be aggregated over any window (for example by voyage day). Several tracks
+    can be evaluated in one call by concatenating them and discarding the
+    joining segments. The segment count is padded to a multiple of ``pad_to`` so
+    one compiled kernel serves tracks of similar length.
 
     Returns host arrays: ``power_kw``, ``swh``, ``tws`` of shape
     ``(member, segment)``; ``seg_h`` and ``t_mid_h`` per segment; and ``valid``,
@@ -467,51 +301,36 @@ def member_series(grids, t_h, lat, lon, *, wps, power_fn, pad_to=512):
     are clamped and should be ignored).
     """
     t_h = np.asarray(t_h, np.float64)
-    lat = np.asarray(lat, np.float64)
-    glon = np.asarray(lon, np.float64)
-    n = len(t_h) - 1
-    npad = -(-n // pad_to) * pad_to
     seg = t_h[1:] - t_h[:-1]
-    la0, lo0, la1, lo1 = (
-        jnp.asarray(x, jnp.float32) for x in (lat[:-1], glon[:-1], lat[1:], glon[1:])
+    # Speed uses a floored duration; mid-times come from t_h itself, so a joining
+    # segment between concatenated tracks cannot shift its neighbours.
+    segs = jm.segments(
+        np.asarray(lat, np.float64),
+        np.asarray(lon, np.float64),
+        np.maximum(seg, 1e-6),
+        0.0,
+        xp=np,
+    )._replace(t_mid=(t_h[:-1] + t_h[1:]) / 2)
+    n = len(seg)
+    npad = -(-n // pad_to) * pad_to
+    padded = jm.Segments(
+        *(jnp.asarray(np.pad(x, (0, npad - n), mode="edge"), jnp.float32) for x in segs)
     )
-    dist = np.asarray(jm._haversine_m(la0, lo0, la1, lo1))
-    bearing = np.asarray(jm._bearing_deg(la0, lo0, la1, lo1))
-    v = dist / (np.maximum(seg, 1e-6) * 3600.0)
-    mid_lat = (lat[:-1] + lat[1:]) / 2
-    mid_lon_q = midpoint_lon(glon[:-1], glon[1:], grids.lon_wrap)
-    smid = (t_h[:-1] + t_h[1:]) / 2
-
-    def pad(x):
-        return jnp.asarray(np.pad(x, (0, npad - n), mode="edge"), jnp.float32)
-
-    out = np.asarray(
-        _series_core(
-            grids.u10,
-            grids.v10,
-            grids.swh,
-            grids.mwd_sin,
-            grids.mwd_cos,
-            grids.wlat,
-            grids.wlon,
-            grids.slat,
-            grids.slon,
-            grids.steps,
-            pad(mid_lat),
-            pad(mid_lon_q),
-            pad(bearing),
-            pad(v),
-            pad(smid),
-            power_fn=power_fn,
-            wps=wps,
-        )
-    )[:, :, :n]
+    p, swh, tws = _series(
+        grids.fields, grids.axes, padded, power_fn=power_fn, wps=wps, lon_wrap=grids.lon_wrap
+    )
     steps = np.asarray(grids.steps)
+    t_mid = np.asarray(segs.t_mid)
     return dict(
-        power_kw=out[:, 0],
-        swh=out[:, 1],
-        tws=out[:, 2],
+        power_kw=np.asarray(p)[:, :n],
+        swh=np.asarray(swh)[:, :n],
+        tws=np.asarray(tws)[:, :n],
         seg_h=seg,
-        t_mid_h=smid,
-        valid=(smid >= steps[0]) & (smid <= steps[-1]),
+        t_mid_h=t_mid,
+        valid=(t_mid >= steps[0]) & (t_mid <= steps[-1]),
     )
+
+
+@partial(jax.jit, static_argnames=("power_fn", "wps", "lon_wrap"))
+def _series(fields, axes, segs, *, power_fn, wps, lon_wrap):
+    return jm.sample(fields, axes, segs, power_fn, wps, lon_wrap)

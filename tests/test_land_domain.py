@@ -17,10 +17,10 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "examples"))
 from toy_power import toy_power_jax  # noqa: E402
 
-from timbers import model as jm  # noqa: E402
 from timbers import optimizer as op  # noqa: E402
 from timbers.era5 import load_era5  # noqa: E402
 from timbers.land import exclusion_raster  # noqa: E402
+from timbers.model import Grids  # noqa: E402
 from timbers.seafill import fill_from_nearest_sea  # noqa: E402
 
 
@@ -151,14 +151,19 @@ def _grids():
         "swh": np.full(shape, 1.5, np.float32),
         "mwd": np.full(shape, 200.0, np.float32),
     }
-    return jm.DeviceGrids(wind, wave)
+    return Grids.from_era5(wind, wave)
+
+
+def _costs(raster, theta):
+    fit, shared = op.build_fit(
+        COR, _grids(), op.DeviceLand(raster), op.Penalty(), K, NSP, L, 0.0, False, toy_power_jax
+    )
+    theta = jnp.asarray(np.atleast_2d(theta), jnp.float32)
+    return np.asarray(fit(theta, (jnp.float32(0.0), *shared)))
 
 
 def _cost(land, theta):
-    fn = op.make_batched_cost(
-        _grids(), op.DeviceLand(land), COR, L, False, op.Penalty(), K, toy_power_jax, n_speed=NSP
-    )
-    return float(fn(jnp.asarray(theta)[None, :], jnp.float32(0.0))[0])
+    return float(_costs(land, theta)[0])
 
 
 def test_land_is_hard_and_free_at_sea():
@@ -195,20 +200,6 @@ def test_port_on_land_keeps_cost_resolution():
     theta = np.tile(op.gc_init_theta(COR, K, NSP), (64, 1)).astype(np.float32)
     theta[:, -NSP:] = rng.normal(0.0, 0.02, (64, NSP))
 
-    def costs(raster):
-        fn = op.make_batched_cost(
-            _grids(),
-            op.DeviceLand(raster),
-            COR,
-            L,
-            False,
-            op.Penalty(),
-            K,
-            toy_power_jax,
-            n_speed=NSP,
-        )
-        return np.asarray(fn(jnp.asarray(theta), jnp.float32(0.0)))
-
-    on_land, free = costs(land), costs(sea)
+    on_land, free = _costs(land, theta), _costs(sea, theta)
     assert len(np.unique(free)) == 64
     np.testing.assert_array_equal(on_land, free)

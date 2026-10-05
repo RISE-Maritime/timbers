@@ -21,7 +21,7 @@ from datetime import datetime
 
 from run_toy import COR, K, L, ALIGN, synthetic_grids
 
-from timbers import model as jm
+from timbers.model import Grids
 from timbers import optimizer as op
 from timbers import solve as oj
 from toy_power import toy_power_jax, toy_power_np
@@ -32,7 +32,7 @@ N_SEEDS, POPSIZE, MAXITER = 4, 64, 150
 
 def run(n_speed: int, polish: bool) -> float:
     wind, wave = synthetic_grids(storm=True)
-    grids = jm.DeviceGrids(wind, wave)
+    grids = Grids.from_era5(wind, wave)
     llat = np.arange(35.0, 50.001, 1.0)
     lwlon = np.arange(-75.0, 5.001, 1.0)
     land = op.DeviceLand(

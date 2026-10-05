@@ -22,8 +22,8 @@ from toy_power import toy_power_jax, toy_power_np  # noqa: E402
 from timbers import ensemble as te  # noqa: E402
 from timbers import model as jm  # noqa: E402
 from timbers import optimizer as op  # noqa: E402
-from timbers import risk as rk  # noqa: E402
 from timbers.geo import midpoint_lon  # noqa: E402
+from timbers.model import Grids  # noqa: E402
 from timbers.scoring import evaluate_route, evaluate_route_full  # noqa: E402
 
 K, L, NSP, ALIGN = 6, 40, 4, 0.25
@@ -117,7 +117,7 @@ def test_host_scorers(case):
 
 def test_device_route_energy(case):
     def energy(grids):
-        g = jm.DeviceGrids(*grids)
+        g = Grids.from_era5(*grids)
         lons = jnp.asarray(op.working_to_signed(case["wlon"]), jnp.float32)
         return float(
             jm.route_energy(
@@ -128,7 +128,7 @@ def test_device_route_energy(case):
                 0.0,
                 False,
                 toy_power_jax,
-            )
+            )[0]
         )
 
     assert energy(case["seam"]) == pytest.approx(energy(case["calm"]), rel=1e-5)
@@ -136,59 +136,69 @@ def test_device_route_energy(case):
 
 def test_optimizer_cost(case):
     def cost(grids):
-        fn = op.make_batched_cost(
-            jm.DeviceGrids(*grids),
-            _land(),
+        fit, shared = op.build_fit(
             case["cor"],
-            L,
-            False,
+            Grids.from_era5(*grids),
+            _land(),
             op.Penalty(),
             K,
+            NSP,
+            L,
+            ALIGN,
+            False,
             toy_power_jax,
-            n_speed=NSP,
-            align_dt_h=ALIGN,
         )
-        return float(fn(jnp.asarray(case["theta"], jnp.float32)[None, :], 0.0)[0])
+        theta = jnp.asarray(case["theta"], jnp.float32)[None, :]
+        return float(fit(theta, (jnp.float32(0.0), *shared))[0])
 
     assert cost(case["seam"]) == pytest.approx(cost(case["calm"]), rel=1e-5)
 
 
-def test_risk_scorer_and_robust_cost(case):
-    perts = rk.perturbation_grid()
-    slon = jnp.asarray(op.working_to_signed(case["wlon"]), jnp.float32)
-    scorer = rk.make_scorer(
-        jm.DeviceGrids(*case["seam"]), case["cor"], False, toy_power_jax, align=ALIGN
+def test_perturbation_surrogate(case):
+    """The surrogate's nominal row reads the route's own weather, and its
+    expected-exceedance cost sees the calm band, not the far side of the globe."""
+    perts = te.perturbation_grid()
+    m = te.score_members(
+        Grids.from_era5(*case["seam"]),
+        case["cor"],
+        case["lat"],
+        case["wlon"],
+        case["seg"],
+        wps=False,
+        power_fn=toy_power_jax,
+        align=ALIGN,
+        hs_lim=7.0,
+        tws_lim=20.0,
+        perturbations=perts,
     )
-    _, max_hs, _ = scorer(
-        jnp.asarray(case["lat"], jnp.float32),
-        slon,
-        jnp.asarray(case["seg"], jnp.float32),
-        0.0,
-        perts,
-    )
-    assert float(max_hs[0]) == pytest.approx(CALM)
+    assert float(m["max_hs"][0]) == pytest.approx(CALM)
 
     def cost(grids):
-        fn = rk.make_robust_cost(
-            jm.DeviceGrids(*grids),
+        fit, shared = te.make_ensemble_cost(
+            Grids.from_era5(*grids),
             _land(),
             case["cor"],
-            L,
-            False,
-            K,
-            NSP,
-            ALIGN,
-            perts,
-            toy_power_jax,
+            objective="chance_constrained",
+            safety_mode="mean",
+            L=L,
+            K=K,
+            n_speed=NSP,
+            align=ALIGN,
+            wps=False,
+            power_fn=toy_power_jax,
+            hs_lim=7.0,
+            tws_lim=20.0,
+            perturbations=perts,
         )
-        return float(fn(jnp.asarray(case["theta"], jnp.float32)[None, :], 0.0)[0])
+        theta = jnp.asarray(case["theta"], jnp.float32)[None, :]
+        return float(fit(theta, (jnp.float32(0.0), *shared))[0])
 
     assert cost(case["seam"]) == pytest.approx(cost(case["calm"]), rel=1e-5)
 
 
 def _ensemble(grids):
     wind, wave = grids
-    return te.EnsembleGrids(
+    return Grids(
         {
             "lat": wind["lat"],
             "lon": wind["lon"],
