@@ -37,6 +37,7 @@ reads plausible weather. Keeping routes off land is the exclusion penalty's job
 
 from __future__ import annotations
 
+from datetime import timezone
 from pathlib import Path
 
 import numpy as np
@@ -46,7 +47,14 @@ try:  # netCDF4 is required to read the .nc files
 except ImportError as exc:  # pragma: no cover
     raise ImportError("timbers.weather requires the 'netCDF4' package") from exc
 
-__all__ = ["load_era5", "query", "query_angle", "fill_from_nearest_sea", "nearest_sea_index"]
+__all__ = [
+    "load_era5",
+    "query",
+    "query_angle",
+    "fill_from_nearest_sea",
+    "nearest_sea_index",
+    "utc_datetime64",
+]
 
 # Data variables we know how to load, by file type. Coordinate/metadata
 # variables are skipped.
@@ -277,3 +285,15 @@ def fill_from_nearest_sea(a: np.ndarray, masked: np.ndarray) -> np.ndarray:
         return a
     yi, xi = nearest_sea_index(grid)
     return np.where(masked, a[..., yi, xi], a)
+
+
+def utc_datetime64(when) -> np.datetime64:
+    """``when`` as ``datetime64[s]`` in UTC, the clock of every grid.
+
+    A timezone-aware datetime is converted to UTC; a naive one, or a
+    ``datetime64``, is taken to be UTC already. Dropping the timezone without
+    converting would shift the weather a departure reads by its UTC offset.
+    """
+    if getattr(when, "tzinfo", None) is not None:
+        when = when.astimezone(timezone.utc).replace(tzinfo=None)
+    return np.datetime64(when, "s")

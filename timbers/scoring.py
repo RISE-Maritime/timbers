@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 
 import numpy as np
 
-from .weather import query, query_angle
+from .weather import query, query_angle, utc_datetime64
 from .geo import bearing_deg as _forward_bearing_deg
 from .geo import haversine_m as _haversine_m
 from .geo import midpoint_lon, to_grid_lon
@@ -288,9 +288,7 @@ def evaluate_route_saturated(
 
     glon = wind_grid["lon"]
     wrap = glon[0] >= 0 and glon[-1] > 180
-    dep_off = float(
-        (np.datetime64(dep.replace(tzinfo=None), "s") - wind_grid["t0"]) / np.timedelta64(1, "h")
-    )
+    dep_off = float((utc_datetime64(dep) - wind_grid["t0"]) / np.timedelta64(1, "h"))
     limit_h = np.inf if max_hours is None else float(max_hours)
 
     def sample(dist, hours):

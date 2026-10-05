@@ -24,6 +24,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from .geo import bearing_deg, haversine_m, midpoint_lon, to_grid_lon
+from .weather import utc_datetime64
 
 jax.config.update("jax_enable_x64", False)
 
@@ -91,20 +92,23 @@ class Grids:
         """A single gridded field (e.g. from ``load_era5``) as a one-member grid.
 
         Without ``start``, the whole grid is used and ``t0`` is the grid's first
-        time. With ``start`` (a datetime) and ``hours``, the grid is cut to the
-        window ``[start, start + hours]`` and ``t0 = start``; ``start`` must fall
-        on a time step of both grids and both must cover the window, otherwise
-        ``ValueError``.
+        time; both grids must start then. With ``start`` (a datetime; tz-aware
+        is converted to UTC) and ``hours``, the grid is cut to the window
+        ``[start, start + hours]`` and ``t0 = start``; ``start`` must fall on a
+        time step of both grids and both must cover the window. Anything else
+        raises ``ValueError``.
         """
         dt = float(wind["dt_h"])
         if float(wave["dt_h"]) != dt:
             raise ValueError("wind and wave grids must share a time step")
+        if (start is None) != (hours is None):
+            raise ValueError("pass start and hours together, or neither")
         if start is None:
+            if np.datetime64(wave["t0"], "s") != np.datetime64(wind["t0"], "s"):
+                raise ValueError("wind and wave grids must start at the same time")
             t0, i0, n = np.datetime64(wind["t0"], "s"), 0, None
         else:
-            if hours is None:
-                raise ValueError("hours is required with start")
-            t0 = np.datetime64(start.replace(tzinfo=None), "s")
+            t0 = utc_datetime64(start)
             n = int(hours / dt) + 3
         out = {}
         for name, g, keys in (("wind", wind, ("u10", "v10")), ("wave", wave, ("swh", "mwd"))):
@@ -135,13 +139,14 @@ class Grids:
         return (self.wind_lat, self.wind_lon, self.wave_lat, self.wave_lon, self.steps)
 
     def hours_after_t0(self, when) -> float:
-        """Hours from ``t0`` to ``when`` (a datetime), e.g. a departure offset."""
+        """Hours from ``t0`` to ``when``, e.g. a departure offset.
+
+        ``when`` is a datetime (naive is taken as UTC; tz-aware is converted) or
+        a ``datetime64``.
+        """
         if self.t0 is None:
             raise ValueError("these grids have no t0")
-        if hasattr(when, "tzinfo"):  # datetime, possibly tz-aware
-            when = when.replace(tzinfo=None)
-        when = np.datetime64(when, "s")
-        return float((when - self.t0) / np.timedelta64(1, "h"))
+        return float((utc_datetime64(when) - self.t0) / np.timedelta64(1, "h"))
 
 
 # ---------------------------------------------------------------------------

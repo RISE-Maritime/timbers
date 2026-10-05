@@ -155,9 +155,10 @@ def test_optimizer_cost(case):
 
 
 def test_perturbation_surrogate(case):
-    """The surrogate's nominal row reads the route's own weather, and its
-    expected-exceedance cost sees the calm band, not the far side of the globe."""
-    perts = te.perturbation_grid()
+    """The surrogate reads the route's own weather, shifted in longitude across
+    the seam (dlon wraps to the grid's convention), and its expected-exceedance
+    cost sees the calm band, not the far side of the globe."""
+    perts = te.perturbation_grid(dlon=(0.0, 0.5, -0.5))
     m = te.score_members(
         Grids.from_era5(*case["seam"]),
         case["cor"],
@@ -171,7 +172,7 @@ def test_perturbation_surrogate(case):
         tws_lim=20.0,
         perturbations=perts,
     )
-    assert float(m["max_hs"][0]) == pytest.approx(CALM)
+    np.testing.assert_allclose(m["max_hs"], CALM)
 
     def cost(grids):
         fit, shared = te.make_ensemble_cost(

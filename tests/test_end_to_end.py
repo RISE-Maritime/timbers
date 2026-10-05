@@ -303,3 +303,26 @@ def test_windowed_grids_keep_the_clock():
         return float(fit(x0, (jnp.float32(grids.hours_after_t0(dep)), *shared))[0])
 
     assert cost(window) == pytest.approx(cost(full), rel=1e-5)
+
+
+def test_departures_are_read_in_utc():
+    """A tz-aware departure is converted to UTC, as the host scorer does, and a
+    grid window cut at a tz-aware start keeps the UTC clock."""
+    from datetime import timezone
+
+    _, wind, wave = _device_grids()
+    plus2 = timezone(timedelta(hours=2))
+    full = Grids.from_era5(wind, wave)
+    assert full.hours_after_t0(datetime(2024, 1, 1, 8, tzinfo=plus2)) == 6.0
+    assert full.hours_after_t0(np.datetime64("2024-01-01T06:00")) == 6.0
+    window = Grids.from_era5(wind, wave, start=datetime(2024, 1, 1, 8, tzinfo=plus2), hours=24.0)
+    assert window.t0 == np.datetime64("2024-01-01T06:00:00")
+
+
+def test_from_era5_rejects_inconsistent_inputs():
+    _, wind, wave = _device_grids()
+    with pytest.raises(ValueError, match="together"):
+        Grids.from_era5(wind, wave, hours=24.0)
+    late = {**wave, "t0": wave["t0"] + np.timedelta64(1, "h")}
+    with pytest.raises(ValueError, match="same time"):
+        Grids.from_era5(wind, late)

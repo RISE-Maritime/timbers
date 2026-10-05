@@ -260,3 +260,47 @@ def test_port_on_land_keeps_cost_resolution():
         out.append(np.asarray(fit(jnp.asarray(theta), (jnp.float32(0.0), *shared))))
     assert len(np.unique(out[0])) == 64
     np.testing.assert_array_equal(out[1], out[0])
+
+
+def test_perturbations_multiply_members_perturbation_major():
+    """With perturbations, members are (perturbation, member) pairs in
+    perturbation-major order, and the unperturbed row reproduces the members."""
+    g = Grids(*_members([1.0, 2.0, 3.0]), STEPS)
+    plain = _gc_members(g)
+    perts = te.perturbation_grid(hs=(1.0, 2.0))
+    lat, wlon, seg = op.decode_route(op.gc_init_theta(COR, K, NSP), COR, K, L, NSP)
+    m = te.score_members(
+        g,
+        COR,
+        lat,
+        wlon,
+        seg,
+        wps=False,
+        power_fn=toy_power_jax,
+        align=ALIGN,
+        perturbations=perts,
+        **LIMITS,
+    )
+    np.testing.assert_allclose(m["max_hs"], [1, 2, 3, 2, 4, 6], rtol=1e-6)
+    np.testing.assert_array_equal(m["energy_mwh"][:3], plain["energy_mwh"])
+
+
+def test_mean_safety_is_the_mean_member_penalty():
+    """safety_mode="mean" averages the members' soft penalties: with identical
+    members it equals member 0's, i.e. the deterministic objective, and with one
+    stormy member out of four it is a quarter of that member's penalty."""
+    same = Grids(*_members([6.9] * 4), STEPS)
+    det = _fit(same, "deterministic")
+    assert det > _fit(Grids(*_members([1.0] * 4), STEPS), "deterministic")  # penalty active
+    assert _fit(same, "chance_constrained", safety_mode="mean") == pytest.approx(det, rel=1e-6)
+
+    # chance_constrained takes energy from member 0 (calm here), so the mixed cost
+    # exceeds the all-calm one by the storm member's penalty alone, over 4.
+    storm_g, calm_g = Grids(*_members([6.9]), STEPS), Grids(*_members([1.0]), STEPS)
+    storm, calm = _fit(storm_g, "deterministic"), _fit(calm_g, "deterministic")
+    extra_energy = _gc_members(storm_g)["energy_mwh"][0] - _gc_members(calm_g)["energy_mwh"][0]
+    storm_penalty = storm - calm - float(extra_energy)
+    mixed = _fit(
+        Grids(*_members([1.0, 1.0, 1.0, 6.9]), STEPS), "chance_constrained", safety_mode="mean"
+    )
+    assert mixed - calm == pytest.approx(storm_penalty / 4, rel=1e-3)

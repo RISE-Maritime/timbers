@@ -170,3 +170,13 @@ def test_antimeridian_crossing_samples_the_right_weather():
     trk = np.asarray(r["track"]["lon"])
     assert np.all((trk >= 170.0 - 1e-6) | (trk <= -160.0 + 1e-6))
     assert r["end_lon"] == pytest.approx(-160.0, abs=1e-3)
+
+
+def test_departure_in_another_timezone_is_the_same_instant():
+    """A tz-aware departure is read in UTC: 02:00+02:00 sails as 00:00 UTC."""
+    wind, wave = _grids()
+    lat, lon, seg = _route()
+    utc = evaluate_route_saturated(wind, wave, DEP, lat, lon, seg, toy_power_np)
+    local = DEP.astimezone(timezone(timedelta(hours=2)))
+    other = evaluate_route_saturated(wind, wave, local, lat, lon, seg, toy_power_np)
+    assert other["energy_mwh"] == utc["energy_mwh"]
