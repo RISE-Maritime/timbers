@@ -34,6 +34,7 @@ from datetime import datetime, timedelta
 import numpy as np
 
 from .era5 import query, query_angle
+from .geo import midpoint_lon
 
 __all__ = ["evaluate_route", "evaluate_route_full"]
 
@@ -106,12 +107,11 @@ def evaluate_route(
 
     # Normalize longitudes for ERA5 grid
     grid_lon = wind_grid["lon"]
-    if grid_lon[0] >= 0 and grid_lon[-1] > 180:
-        lons = np.where(lons < 0, lons + 360, lons)
+    wrap = bool(grid_lon[0] >= 0 and grid_lon[-1] > 180)
 
     # Segment midpoints
     mid_lat = (lats[:-1] + lats[1:]) / 2
-    mid_lon = (lons[:-1] + lons[1:]) / 2
+    mid_lon = midpoint_lon(lons[:-1], lons[1:], wrap)
 
     # Time at midpoints (hours since grid t0)
     dep_dt64 = wp_times[0]
@@ -204,11 +204,10 @@ def evaluate_route_full(
     seg_dt_h = np.maximum(seg_dt_h, 1e-6)
 
     grid_lon = wind_grid["lon"]
-    if grid_lon[0] >= 0 and grid_lon[-1] > 180:
-        lons = np.where(lons < 0, lons + 360, lons)
+    wrap = bool(grid_lon[0] >= 0 and grid_lon[-1] > 180)
 
     mid_lat = (lats[:-1] + lats[1:]) / 2
-    mid_lon = (lons[:-1] + lons[1:]) / 2
+    mid_lon = midpoint_lon(lons[:-1], lons[1:], wrap)
 
     dep_dt64 = wp_times[0]
     dep_offset_h = float((dep_dt64 - wind_grid["t0"]) / np.timedelta64(1, "h"))

@@ -48,6 +48,7 @@ import numpy as np
 
 from . import model as jm
 from . import optimizer as op
+from .geo import midpoint_lon
 
 
 # ---------------------------------------------------------------------------
@@ -74,14 +75,16 @@ def make_scorer(grids, cor, wps, power_fn, align=0.25):
         t_cum = jnp.concatenate([jnp.zeros(1, lat.dtype), jnp.cumsum(seg_dt)])
         tau = jnp.linspace(0.0, cor.hours, M + 1).astype(lat.dtype)
         rlat = jnp.interp(tau, t_cum, lat)
-        rlon = jnp.interp(tau, t_cum, wlon_s)  # signed lon
+        # Interpolate in continuous longitude, so a leg across 180 does not go the
+        # long way round, then back to signed.
+        rlon = op.working_to_signed(jnp.interp(tau, t_cum, jnp.unwrap(wlon_s, period=360.0)))
         seg = jnp.full((M,), cor.hours / M, lat.dtype)
         # ship geometry/speed from the ACTUAL route (unperturbed)
         dist = jm._haversine_m(rlat[:-1], rlon[:-1], rlat[1:], rlon[1:])
         v = dist / (seg * 3600.0)
         bearing = jm._bearing_deg(rlat[:-1], rlon[:-1], rlat[1:], rlon[1:])
         mid_lat = (rlat[:-1] + rlat[1:]) / 2
-        mid_lon = (rlon[:-1] + rlon[1:]) / 2
+        mid_lon = midpoint_lon(rlon[:-1], rlon[1:], False)  # signed
         cum = jnp.cumsum(seg)
         smid = dep_off + cum - seg / 2
         # PERTURBED weather query: shifted position/time, scaled amplitude
@@ -191,7 +194,7 @@ def make_robust_cost(
         v = dist / (seg * 3600.0)
         bearing = jm._bearing_deg(rlat[:-1], glon[:-1], rlat[1:], glon[1:])
         mid_lat = (rlat[:-1] + rlat[1:]) / 2
-        mid_lon = (glon[:-1] + glon[1:]) / 2  # signed
+        mid_lon = midpoint_lon(glon[:-1], glon[1:], False)  # signed
         cum = jnp.cumsum(seg)
         smid = dep_off + cum - seg / 2
 

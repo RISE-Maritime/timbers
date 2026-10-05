@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import numpy as np
 
-__all__ = ["great_circle_points", "gc_distance_nm"]
+__all__ = ["great_circle_points", "gc_distance_nm", "midpoint_lon"]
 
 _R_EARTH_M = 6_371_000.0
 
@@ -49,3 +49,24 @@ def gc_distance_nm(lat0: float, lon0: float, lat1: float, lon1: float) -> float:
     p1 = _to_xyz(lat1, lon1)
     omega = np.arccos(float(np.clip(np.dot(p0, p1), -1.0, 1.0)))
     return omega * _R_EARTH_M / 1852.0
+
+
+def midpoint_lon(lon_a, lon_b, wrap: bool):
+    """Midpoint of the shorter arc between two longitudes, in a grid's convention.
+
+    Averaging longitudes directly is wrong for a segment across the seam of the
+    convention it is written in: in signed longitude the midpoint of 179.9 and
+    -179.9 comes out at 0, and in 0-360 longitude the midpoint of 359.9 and 0.1
+    comes out at 180. Taking half of the shorter signed difference avoids both.
+
+    Returns longitudes in [0, 360) if ``wrap`` (a grid in 0-360 longitude),
+    otherwise in [-180, 180). Arithmetic only, so it works elementwise on NumPy
+    and JAX arrays alike.
+    """
+    d = (lon_b - lon_a + 180.0) % 360.0 - 180.0
+    mid = lon_a + d / 2
+    if not wrap:
+        mid = mid + 180.0
+    m = mid % 360.0
+    m = m - 360.0 * (m >= 360.0)  # a tiny negative mid rounds to exactly 360.0
+    return m if wrap else m - 180.0
