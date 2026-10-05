@@ -148,7 +148,7 @@ def make_robust_cost(
     aH=8.0,
     aU=3.0,
     lam_env=30.0,
-    lam_land=100.0,
+    lam_land=1e6,
     nominal_idx=0,
     p_lim=float("inf"),
     aP=6.0,
@@ -225,7 +225,7 @@ def make_robust_cost(
         energies, envs = jax.vmap(per_pert)(pert_arr)  # (Pn,), (Pn,)
         nominal_E = energies[nominal_idx]
         risk = jnp.mean(envs)  # expected ensemble exceedance
-        p_land = jnp.sum(op._sample_mask(lmask, llat, lwlon, rlat, rlon))
+        p_land = jnp.sum(op._sample_mask(lmask, llat, lwlon, rlat[1:-1], rlon[1:-1]))  # ports out
         return nominal_E + lam_env * risk + lam_land * p_land
 
     batched = jax.jit(jax.vmap(one, in_axes=(0, None, None, None, None)))

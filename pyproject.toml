@@ -14,6 +14,7 @@ dependencies = [
     "jax",
     "numpy",
     "netCDF4",
+    "scipy",
     "shapely>=2.0",
 ]
 

@@ -12,7 +12,7 @@ The batched penalized cost is evaluated for the whole population on the GPU.
 
 Cost:  J = energy_MWh + lambda_env * P_env + lambda_land * P_land
   P_env  = sum_seg [exp(aH*[Hs-hs_soft]+) + exp(aU*[TWS-us_soft]+) - 2]
-  P_land = sum_wp  land_fraction(waypoint)
+  P_land = sum_wp  exclusion(waypoint)   (0 at sea; see land.exclusion_raster)
 """
 
 from __future__ import annotations
@@ -100,7 +100,15 @@ class Penalty:
     # limits to keep a safety margin, since minimizing energy rewards tall
     # *following* seas and must be actively counteracted.
     lambda_env: float = 30.0
-    lambda_land: float = 100.0
+    # Land is a hard constraint. sep-CMA-ES ranks the population, so fitness
+    # matters only through its order, and a weight larger than any achievable
+    # weather saving ranks every route that enters the mask below every route
+    # that does not. A finite price would instead let the optimizer trade a
+    # land crossing (a short cut, or shelter behind a coast) against weather.
+    # The term is zero for a route clear of land. Use it with
+    # ``land.exclusion_raster``, whose ramp orders routes inside the mask by
+    # how far in they are, so an infeasible population still has a way out.
+    lambda_land: float = 1e6
     aH: float = 6.0
     aU: float = 2.0
     hs_soft: float = 6.5
@@ -198,7 +206,10 @@ def _route_cost(
         over_p = jnp.maximum(p / pen.p_soft - 1.0, 0.0)
         p_env = p_env + jnp.sum(jnp.exp(pen.aP * over_p) - 1.0)
 
-    p_land = jnp.sum(_sample_mask(lmask, llat, lwlon, lat, wlon))
+    # The end points are the fixed ports, identical for every candidate. A port
+    # touching the raster would add a constant lambda_land offset that, in
+    # float32, rounds away small energy differences, so they are left out.
+    p_land = jnp.sum(_sample_mask(lmask, llat, lwlon, lat[1:-1], wlon[1:-1]))
 
     cost = energy + pen.lambda_env * p_env + pen.lambda_land * p_land
     return cost, energy, p_env, p_land

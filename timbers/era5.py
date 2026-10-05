@@ -28,6 +28,8 @@ from pathlib import Path
 
 import numpy as np
 
+from .seafill import fill_from_nearest_sea
+
 try:  # netCDF4 is required to read the .nc files
     import netCDF4 as nc
 except ImportError as exc:  # pragma: no cover
@@ -77,7 +79,7 @@ def _times_to_datetime64(tvar) -> np.ndarray:
 # ---------------------------------------------------------------------------
 # Loading
 # ---------------------------------------------------------------------------
-def load_era5(paths: list[str] | str) -> dict:
+def load_era5(paths: list[str] | str, land_fill: str = "nearest") -> dict:
     """Load and time-concatenate one or more ERA5 NetCDF files.
 
     Parameters
@@ -85,6 +87,11 @@ def load_era5(paths: list[str] | str) -> dict:
     paths : str or list of str
         File paths. They are sorted by their first timestamp and concatenated
         along the time axis. All files must share the same lat/lon grid.
+    land_fill : {"nearest", "zero"}
+        How land-masked cells (ERA5 waves; masked or NaN) are filled. ``"nearest"`` (default)
+        carries the nearest sea cell's value inland, so land does not read as
+        flat calm; see :mod:`timbers.seafill`. ``"zero"`` fills them with
+        0.0.
 
     Returns
     -------
@@ -93,13 +100,15 @@ def load_era5(paths: list[str] | str) -> dict:
         (datetime64[s] of first time), ``times`` (datetime64[s] array),
         ``dt_h`` (mean hourly spacing), plus one (T, Y, X) float32 array per
         data variable (e.g. ``u10``, ``v10``, ``swh``, ``mwd``). Land-masked
-        cells are filled with 0.0.
+        cells are filled according to ``land_fill``.
     """
     if isinstance(paths, (str, Path)):
         paths = [str(paths)]
     paths = [str(p) for p in paths]
     if not paths:
         raise ValueError("load_era5: no paths given")
+    if land_fill not in ("nearest", "zero"):
+        raise ValueError(f"load_era5: unknown land_fill {land_fill!r}")
 
     per_file = []
     lat = lon = None
@@ -124,8 +133,12 @@ def load_era5(paths: list[str] | str) -> dict:
             var_names = names
         data = {}
         for v in var_names:
-            arr = ds.variables[v][:]
-            arr = np.ma.filled(arr, 0.0).astype(np.float32)
+            raw = ds.variables[v][:]
+            # NaN counts as masked: files without a NaN _FillValue store land as NaN.
+            masked = np.ma.getmaskarray(raw) | ~np.isfinite(np.ma.getdata(raw))
+            arr = np.where(masked, 0.0, np.ma.getdata(raw)).astype(np.float32)
+            if land_fill == "nearest" and masked.any():
+                arr = fill_from_nearest_sea(arr, masked)
             data[v] = arr
         per_file.append((times[0], times, data))
         ds.close()
