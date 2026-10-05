@@ -18,7 +18,7 @@ Three rules govern the loop:
   calm-water passage at ``p_max``, it is floored there and the plan is a best
   effort.
 * **Each cycle needs only the remaining horizon.** The forecast provider is
-  asked for ``remaining_h`` hours from the cycle time, not for its full range.
+  asked for the remaining passage from the cycle time, not for its full range.
 
 The forecast is supplied as a callable, so any source fits: an archive of
 ensemble forecasts, a single deterministic forecast, or the verifying field
@@ -64,13 +64,24 @@ def _plan(
     return best, best_j
 
 
-def _sailed_window(seg_dt, hours):
-    """Index ``j`` and segment durations of the first ``hours`` of a plan."""
+def _wrap(dlon):
+    """Longitude difference in [-180, 180)."""
+    return (dlon + 180.0) % 360.0 - 180.0
+
+
+def _sailed_window(lat, wlon, seg_dt, hours):
+    """The first ``hours`` of a plan as ``(lat, wlon, seg_dt)``.
+
+    The last segment ends where the plan puts the ship at ``hours``, found by
+    linear interpolation along that segment, as the track is sampled.
+    """
     t_cum = np.concatenate([[0.0], np.cumsum(seg_dt)])
     j = int(np.clip(np.searchsorted(t_cum, hours, side="left"), 1, len(seg_dt)))
-    sub = seg_dt[:j].copy()
-    sub[-1] -= t_cum[j] - hours
-    return j, sub
+    f = min((hours - t_cum[j - 1]) / seg_dt[j - 1], 1.0)
+    sub = np.append(seg_dt[: j - 1], f * seg_dt[j - 1])
+    end_lat = lat[j - 1] + f * (lat[j] - lat[j - 1])
+    end_wlon = wlon[j - 1] + f * (wlon[j] - wlon[j - 1])
+    return np.append(lat[:j], end_lat), np.append(wlon[:j], end_wlon), sub
 
 
 def sail_with_replanning(
@@ -111,11 +122,13 @@ def sail_with_replanning(
     Parameters
     ----------
     origin, destination : (lat, lon)
-        End points, signed longitude.
+        End points, signed longitude. The voyage may cross 180: plans are made
+        in working longitude continuous with the origin's (the destination on
+        the short way round), as in :class:`timbers.optimizer.Corridor`.
     hours : float
         Contractual passage time from ``dep``.
     dep : datetime
-        Departure time; cycle ``k`` is issued at ``dep + k * cycle_h``.
+        Departure time.
     forecast : callable
         ``forecast(cycle_time, hours) -> timbers.model.Grids`` covering at
         least ``hours`` from ``cycle_time``. Each plan starts ``cycle_time``
@@ -126,7 +139,8 @@ def sail_with_replanning(
         Verifying weather the ship sails on (e.g. from
         :func:`timbers.weather.load_era5`).
     land : DeviceLand
-        Exclusion raster for planning.
+        Exclusion raster for planning, in that working longitude (for a
+        voyage from 170 to -165, ``wlon`` covering 170 to 195).
     objective : str
         One of :data:`timbers.ensemble.OBJECTIVES`.
     power_fn, power_fn_host : callable
@@ -141,7 +155,9 @@ def sail_with_replanning(
         Plan against ``plan_limit_scale`` times the limits; below 1 this is a
         safety margin. The promise is still computed against the true limits.
     cycle_h : float
-        Hours between forecast cycles, and hence sailed per plan.
+        Hours between forecast cycles. Cycle ``k`` is issued at
+        ``dep + k * cycle_h``; each plan uses the latest cycle issued by the
+        ship's clock and is sailed until the next.
     K, L, n_speed, align, wps, eps, **cost_kw
         Passed to :func:`timbers.ensemble.make_ensemble_cost`, with the same
         values for every leg.
@@ -167,7 +183,12 @@ def sail_with_replanning(
     """
     o_lat, o_lon = origin
     d_lat, d_lon = destination
+    # Plans are made in one continuous working longitude, starting at the
+    # origin's, so a voyage across 180 is not sailed the long way round.
+    d_wlon = o_lon + _wrap(d_lon - o_lon)
     v_calm = float(v_max_for_power(power_fn_host, 0.0, 0.0, 0.0, 0.0, wps, p_max))
+    if v_calm <= 0.0:
+        raise ValueError(f"p_max = {p_max} kW cannot drive the ship at any speed in calm water")
     cost_kw = dict(
         align=align,
         wps=wps,
@@ -179,24 +200,30 @@ def sail_with_replanning(
         **cost_kw,
     )
 
-    lat_now, lon_now = o_lat, o_lon
+    lat_now, wlon_now = o_lat, o_lon
     elapsed = energy = 0.0
     max_hs = max_tws = max_p = 0.0
     legs, track = [], dict(t_h=[0.0], lat=[o_lat], lon=[o_lon])
     arrived = False
 
     for leg in range(MAX_LEGS):
-        remaining_nm = float(haversine_m(lat_now, lon_now, d_lat, d_lon)) / 1852.0
+        remaining_nm = float(haversine_m(lat_now, wlon_now, d_lat, d_wlon)) / 1852.0
         if remaining_nm < 1.0:
             arrived = True
             break
         floor_h = remaining_nm * 1852.0 / (v_calm * 3600.0)
         remaining_h = float(max(hours - elapsed, floor_h))
 
-        cycle_t = dep + timedelta(hours=leg * cycle_h)
-        grids = forecast(cycle_t, remaining_h)
-        dep_off = 0.0 if grids.t0 is None else grids.hours_after_t0(cycle_t)
-        cor = op.Corridor(f"leg{leg}", lat_now, lon_now, d_lat, d_lon, remaining_h)
+        # Plan with the latest cycle issued by the ship's clock, and sail to the
+        # next one. A leg normally sails a whole cycle; one that stops early
+        # (stalled) leaves the next plan part-way into its cycle.
+        k = int(np.floor(elapsed / cycle_h + 1e-9))
+        cycle_t = dep + timedelta(hours=k * cycle_h)
+        into_cycle = max(elapsed - k * cycle_h, 0.0)
+        grids = forecast(cycle_t, into_cycle + remaining_h)
+        now = dep + timedelta(hours=elapsed)
+        dep_off = into_cycle if grids.t0 is None else grids.hours_after_t0(now)
+        cor = op.Corridor(f"leg{leg}", lat_now, wlon_now, d_lat, d_wlon, remaining_h)
         best, best_j = _plan(
             grids,
             land,
@@ -216,20 +243,22 @@ def sail_with_replanning(
 
         p_hat = None
         if record_promise:
-            j, sub = _sailed_window(seg, min(cycle_h, remaining_h))
+            w_lat, w_wlon, sub = _sailed_window(
+                rlat, rwlon, seg, min(cycle_h - into_cycle, remaining_h)
+            )
             sub_cor = op.Corridor(
                 f"leg{leg}_sailed",
-                float(rlat[0]),
-                float(rwlon[0]),
-                float(rlat[j]),
-                float(rwlon[j]),
+                float(w_lat[0]),
+                float(w_wlon[0]),
+                float(w_lat[-1]),
+                float(w_wlon[-1]),
                 float(sub.sum()),
             )
             mem = score_members(
                 grids,
                 sub_cor,
-                rlat[: j + 1],
-                rwlon[: j + 1],
+                w_lat,
+                w_wlon,
                 sub,
                 wps=wps,
                 power_fn=power_fn,
@@ -251,7 +280,7 @@ def sail_with_replanning(
             power_fn_host,
             wps=wps,
             p_max=p_max,
-            max_hours=cycle_h,
+            max_hours=cycle_h - into_cycle,
             t_offset_h=elapsed,
         )
         track["t_h"] += [elapsed + t for t in r["track"]["t_h"][1:]]
@@ -260,7 +289,8 @@ def sail_with_replanning(
 
         energy += r["energy_mwh"]
         elapsed += r["actual_hours"]
-        lat_now, lon_now = r["end_lat"], r["end_lon"]
+        lat_now = r["end_lat"]
+        wlon_now += _wrap(r["end_lon"] - wlon_now)
         max_hs = max(max_hs, r["max_hs_m"])
         max_tws = max(max_tws, r["max_wind_mps"])
         max_p = max(max_p, r["max_power_kw"])
@@ -273,7 +303,7 @@ def sail_with_replanning(
                 elapsed_h=elapsed,
                 energy_mwh=r["energy_mwh"],
                 end_lat=lat_now,
-                end_lon=lon_now,
+                end_lon=r["end_lon"],
                 max_hs_m=r["max_hs_m"],
                 max_wind_mps=r["max_wind_mps"],
                 saturated_frac=r["saturated_frac"],
