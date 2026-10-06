@@ -8,11 +8,15 @@ Properties under test:
   identical members make all four agree);
 - the breach probability of a route counts the members that breach;
 - the per-segment series integrates to the route energy;
-- the cost drives the optimizer.
+- the cost drives the optimizer;
+- power-model draws multiply the members draw-major, reduce as documented
+  (mean, CVaR), travel as traced data, and can enter the safety margin.
 """
 
 import sys
 from datetime import datetime
+from datetime import timedelta
+from functools import partial
 from pathlib import Path
 
 import jax
@@ -21,12 +25,13 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "examples"))
-from toy_power import toy_power_jax  # noqa: E402
+from toy_power import toy_power_jax, toy_power_np  # noqa: E402
 
 from timbers import cmaes as jc  # noqa: E402
 from timbers import ensemble as te  # noqa: E402
 from timbers import model as jm  # noqa: E402
 from timbers import optimizer as op  # noqa: E402
+from timbers import scoring as sc  # noqa: E402
 from timbers.model import Grids  # noqa: E402
 
 COR = op.Corridor("example", 43.6, -4.0, 40.6, -69.0, 48.0)
@@ -79,10 +84,10 @@ def _fit(grids, objective, **kw):
     return float(fit(theta, (jnp.float32(0.0), *shared))[0])
 
 
-def _gc_members(grids):
+def _gc_members(grids, **kw):
     lat, wlon, seg = op.decode_route(op.gc_init_theta(COR, K, NSP), COR, K, L, NSP)
     return te.score_members(
-        grids, COR, lat, wlon, seg, wps=False, power_fn=toy_power_jax, align=ALIGN, **LIMITS
+        grids, COR, lat, wlon, seg, wps=False, power_fn=toy_power_jax, align=ALIGN, **LIMITS, **kw
     )
 
 
@@ -282,7 +287,7 @@ def test_perturbations_multiply_members_perturbation_major():
         **LIMITS,
     )
     np.testing.assert_allclose(m["max_hs"], [1, 2, 3, 2, 4, 6], rtol=1e-6)
-    np.testing.assert_array_equal(m["energy_mwh"][:3], plain["energy_mwh"])
+    np.testing.assert_allclose(m["energy_mwh"][:3], plain["energy_mwh"], rtol=1e-6)
 
 
 def test_mean_safety_is_the_mean_member_penalty():
@@ -304,3 +309,151 @@ def test_mean_safety_is_the_mean_member_penalty():
         Grids(*_members([1.0, 1.0, 1.0, 6.9]), STEPS), "chance_constrained", safety_mode="mean"
     )
     assert mixed - calm == pytest.approx(storm_penalty / 4, rel=1e-3)
+
+
+# --- power-model uncertainty --------------------------------------------------
+def test_model_draws_multiply_members_draw_major():
+    """Members are (draw, weather member) pairs, draw-major; draw 0 at the
+    nominal parameters reproduces the members, and a draw without the wave term
+    makes every weather member cost the same (they differ only in Hs)."""
+    g = Grids(*_members([1.0, 2.0, 3.0]), STEPS)
+    plain = _gc_members(g)
+    m = _gc_members(g, model_params=te.model_param_grid(wave=(1.0, 0.0)))
+    np.testing.assert_allclose(m["max_hs"], [1, 2, 3, 1, 2, 3], rtol=1e-6)
+    np.testing.assert_allclose(m["energy_mwh"][:3], plain["energy_mwh"], rtol=1e-6)
+    assert np.ptp(m["energy_mwh"][3:]) < 1e-6 * m["energy_mwh"][3]
+    assert m["energy_mwh"][3] < m["energy_mwh"][0]
+
+    perts = te.perturbation_grid(hs=(1.0, 2.0))
+    both = _gc_members(g, perturbations=perts, model_params=te.model_param_grid(wave=(1.0, 0.5)))
+    np.testing.assert_allclose(both["max_hs"], [1, 2, 3, 2, 4, 6] * 2, rtol=1e-6)
+
+
+def test_cost_reduces_draws_by_mean_or_cvar():
+    g = Grids(*_members([2.0]), STEPS)
+    draws = te.model_param_grid(calm=(1.0, 1.1, 1.3))
+    e = _gc_members(g, model_params=draws)["energy_mwh"]
+    assert _fit(g, "expected_value", model_params=draws) == pytest.approx(e.mean(), rel=1e-5)
+    worst = _fit(g, "expected_value", model_params=draws, cost_mode="cvar", cost_eps=1 / 3)
+    assert worst == pytest.approx(e.max(), rel=1e-5)
+    assert _fit(g, "deterministic", model_params=draws) == pytest.approx(e[0], rel=1e-5)
+
+
+def test_expected_cost_ignores_spread_linear_in_the_parameters():
+    """Power linear in a parameter: the expected cost over draws symmetric about
+    the nominal is the nominal cost for every route, so it cannot move the
+    optimum. A nonlinear parameter (the speed exponent) does change it."""
+    g = Grids(*_members([2.0]), STEPS)
+    rng = np.random.default_rng(1)
+    theta = np.tile(op.gc_init_theta(COR, K, NSP), (8, 1)).astype(np.float32)
+    theta[:, -NSP:] = rng.normal(0.0, 0.3, (8, NSP))
+
+    def costs(**kw):
+        fit, shared = te.make_ensemble_cost(
+            g,
+            _land(),
+            COR,
+            L=L,
+            K=K,
+            n_speed=NSP,
+            align=ALIGN,
+            wps=False,
+            power_fn=toy_power_jax,
+            **LIMITS,
+            **kw,
+        )
+        return np.asarray(fit(jnp.asarray(theta), (jnp.float32(0.0), *shared)))
+
+    nominal = costs(objective="deterministic")
+    linear = te.model_param_grid(calm=(1.0, 0.9, 1.1), wave=(1.0, 0.7, 1.3))
+    np.testing.assert_allclose(
+        costs(objective="expected_value", model_params=linear), nominal, rtol=1e-5
+    )
+    curved = te.model_param_grid(n=(3.0, 2.7, 3.3))
+    assert (
+        np.max(np.abs(costs(objective="expected_value", model_params=curved) / nominal - 1)) > 1e-3
+    )
+
+
+def test_model_params_travel_as_traced_data():
+    """One compiled cost serves any draws of the same shape: swapping them in
+    ``shared`` gives the cost a cost built with them gives."""
+    g = Grids(*_members([2.0]), STEPS)
+    kw = dict(L=L, K=K, n_speed=NSP, align=ALIGN, wps=False, power_fn=toy_power_jax, **LIMITS)
+    a, b = te.model_param_grid(calm=(1.0, 1.2)), te.model_param_grid(calm=(1.5, 2.0))
+    fit, shared = te.make_ensemble_cost(
+        g, _land(), COR, objective="expected_value", model_params=a, **kw
+    )
+    theta = jnp.asarray(op.gc_init_theta(COR, K, NSP))[None, :]
+    swapped = float(fit(theta, (jnp.float32(0.0), *shared[:-1], te._as_params(b)))[0])
+    assert swapped == pytest.approx(_fit(g, "expected_value", model_params=b), rel=1e-6)
+    assert swapped > float(fit(theta, (jnp.float32(0.0), *shared))[0])
+
+
+def test_power_ceiling_is_its_own_chance_constraint():
+    """With ``power_eps``, a draw that needs more than ``p_lim`` counts as a
+    breach of a power constraint, though the weather is calm; and a breach of
+    the ceiling does not excuse a breach of the seakeeping limits."""
+    g = Grids(*_members([1.0]), STEPS)
+    draws = te.model_param_grid(calm=(1.0, 1.0, 1.6))
+    p_max = float(_gc_members(g, model_params=draws)["max_power"][0])
+    m = _gc_members(g, model_params=draws, p_lim=1.2 * p_max)
+    assert list(m["power_margin"] > 0) == [False, False, True]
+    kw = dict(model_params=draws, p_lim=1.2 * p_max, eps=0.1)
+    off = _fit(g, "chance_constrained", **kw)
+    on = _fit(g, "chance_constrained", power_eps=0.1, **kw)
+    assert on > off + 1.0
+
+    # Every draw over the ceiling: a storm on top must still cost more.
+    kw = dict(model_params=draws, p_lim=0.5 * p_max, power_eps=0.1)
+    calm = _fit(g, "chance_constrained", **kw)
+    storm = _fit(Grids(*_members([9.0]), STEPS), "chance_constrained", **kw)
+    e = [_gc_members(Grids(*_members([h]), STEPS))["energy_mwh"][0] for h in (1.0, 9.0)]
+    assert storm - calm > (e[1] - e[0]) + 1.0
+
+
+def test_model_options_are_checked():
+    g = Grids(*_members([1.0]), STEPS)
+    with pytest.raises(ValueError, match="power_eps needs"):
+        _fit(g, "joint", power_eps=0.1)
+    with pytest.raises(ValueError, match="power_eps needs"):
+        _fit(g, "expected_value", p_lim=1e5, power_eps=0.1)
+    with pytest.raises(ValueError, match="needs an ensemble cost"):
+        _fit(g, "deterministic", cost_mode="cvar")
+    with pytest.raises(ValueError, match="leading"):
+        _fit(g, "joint", model_params={"calm": np.ones(2), "wave": np.ones(3)})
+
+
+def test_draws_score_on_the_host_as_on_the_device():
+    """``model_draws`` hands the host scorer one draw at a time."""
+    wind, wave = _hourly(swh=2.0)
+    g = Grids.from_era5(wind, wave)
+    draws = te.model_param_grid(calm=(1.0, 1.2), n=(3.0, 3.3))
+    dev = _gc_members(g, model_params=draws)["energy_mwh"]
+    lat, wlon, seg = op.decode_route(op.gc_init_theta(COR, K, NSP), COR, K, L, NSP)
+    t = [datetime(2024, 1, 1) + timedelta(hours=float(h)) for h in np.r_[0, np.cumsum(seg)]]
+    wps_ = list(zip(t, lat, op.working_to_signed(wlon)))
+    host = [
+        sc.evaluate_route(wind, wave, wps_, partial(toy_power_np, params=d))
+        for d in te.model_draws(draws)
+    ]
+    assert len(host) == 4
+    np.testing.assert_allclose(host, dev, rtol=0.02)
+
+
+def test_series_carries_the_draws():
+    g = Grids(*_members([1.0, 2.0]), STEPS)
+    lat, wlon, seg = op.decode_route(op.gc_init_theta(COR, K, NSP), COR, K, L, NSP)
+    t = np.concatenate([[0.0], np.cumsum(np.asarray(seg))])
+    s = te.member_series(
+        g,
+        t,
+        lat,
+        op.working_to_signed(wlon),
+        wps=False,
+        power_fn=toy_power_jax,
+        model_params=te.model_param_grid(calm=(1.0, 2.0)),
+    )
+    assert s["power_kw"].shape == (4, len(seg))
+    np.testing.assert_allclose(s["swh"][2:], s["swh"][:2])
+    assert np.all(s["power_kw"][2:] > s["power_kw"][:2])

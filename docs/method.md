@@ -203,6 +203,49 @@ premium — the safety buffer emerging from the local forecast spread rather tha
 hand-tuned margin. Same caveat as §5: toy power model on a constructed scenario,
 so the magnitudes are illustrative of the mechanism, not real-vessel numbers.
 
+**Power-model uncertainty.** The vessel model is uncertain too, and enters the
+same member axis: `model_params` holds draws of the power model's parameters
+(`model_param_grid` for a grid of them), each held for the whole voyage, and
+every (draw, weather member) pair becomes a member. The weather is interpolated
+once and only the power model is re-evaluated per draw. Three properties follow
+from how power enters the objective:
+
+- **The mean rarely moves the route.** Where power is linear in a parameter (a
+  calm-water level for fouling, a coefficient on added resistance in waves),
+  the mean energy over draws is the energy at the mean parameter, so
+  `expected_value` picks the route the mean model does. Only a parameter that
+  enters nonlinearly, such as the speed exponent, can move it.
+- **A risk-averse cost uses the spread.** `cost_mode="cvar"` minimizes the mean
+  energy of the worst `cost_eps` share of members.
+- **Power is never a seakeeping breach.** It reaches the safety term only
+  through the shaft-power ceiling, as its own chance constraint (`power_eps`),
+  not as part of the Hs/TWS margin. In one shared margin, a route that reaches
+  the ceiling in every member would breach the seakeeping limits at no extra
+  cost. Where the ceiling cannot be met in most draws, `safety_mode="cvar"`
+  still ranks routes by how far over it they go; `"prob"` saturates.
+
+`examples/run_model_risk.py` takes the weather as known and the toy model's
+calm-water level (×1.0, 1.1), wave coefficient (×0.6–1.6) and speed exponent
+(2.7–3.3) as uncertain, 18 draws, with no seakeeping limits and a 160 MW
+ceiling. It sails each route under the ceiling once per draw:
+
+```
+route      nom MWh  mean MWh   CVaR20  P>ceil  mean delay  late>1h
+nominal       6778      7118     7499     61%      0.02 h       0%
+mean          6778      7118     7499     61%      0.02 h       0%
+cvar          6778      7118     7499     56%      0.02 h       0%
+ceiling       6781      7122     7503     50%      0.03 h       0%
+```
+
+The spread is large: the mean is 5% and the CVaR20 11% above the nominal
+energy. The routes barely move. The hull term dominates and no route avoids it,
+and the ceiling constraint, the one term that binds, trades 3 MWh for a lower
+share of draws reaching the ceiling, against a slowdown of minutes. On this toy
+model, power-model uncertainty is mostly a matter of measuring a plan's risk
+rather than changing it. A real model with a stronger speed-dependent or
+weather-dependent spread, or a tighter ceiling, may differ; the machinery is the
+same.
+
 ## 5. TiMBERS vs BERS, head to head
 
 Because the time-allocation profile reduces to uniform speed at `n_speed = 0`,

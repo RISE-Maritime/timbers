@@ -15,7 +15,7 @@ out to be the first-order energy lever; global geometry is not.
 > **Bring your own power model and cases.** This is a *method* library: the
 > optimizer, the GPU sep-CMA-ES, the differentiable cost, the gradient polish,
 > the land mask, the ERA5 loader and uncertainty-aware objectives (forecast
-> ensembles and a forecast-error surrogate). It does **not**
+> ensembles, a forecast-error surrogate and power-model uncertainty). It does **not**
 > include any vessel performance model or routing cases — you inject a
 > `power_fn(tws, twa_deg, swh, mwa_deg, v, wps) -> kW` and supply your own
 > corridors/weather. A trivial toy model and a runnable demo are in
@@ -48,7 +48,10 @@ out to be the first-order energy lever; global geometry is not.
    breach probability, a CVaR, or the mean exceedance penalty).
    `score_members` gives per-member outcomes of a fixed route (its fragility,
    under the surrogate) and `member_series` per-segment values along a timed
-   track.
+   track. Uncertainty in the power model itself enters the same way: draws of
+   its parameters (`model_params`, e.g. from `model_param_grid`) multiply the
+   members, with energy reduced by its mean or CVaR (`cost_mode`) and an
+   optional chance constraint on reaching the shaft-power ceiling (`power_eps`).
 6. **Re-planning** (`timbers.replan`). `sail_with_replanning` plans, sails one
    forecast cycle on the verifying weather under the power ceiling, and plans
    again from the realised position with the next forecast, keeping the
@@ -71,7 +74,7 @@ In the order data flows through a solve:
 | `timbers.geo` | Spherical geometry shared by NumPy and JAX: `haversine_m`, `bearing_deg`, `midpoint_lon`, `to_grid_lon` (correct across 0° and 180°). |
 | `timbers.model` | The device core. `Grids` holds fields as `(member, time, lat, lon)` (`Grids.from_era5` for a single field); `sample` gives power, Hs and TWS per member and segment, optionally under a forecast-error perturbation. Every device cost and scorer is a reduction over it. |
 | `timbers.optimizer` | Route parameterization (`Corridor`, `bezier`, `time_alloc`, `theta_to_track`, `decode_route`, and its inverse `fit_theta_to_track`), the penalized cost (`Penalty`, `DeviceLand`) and `build_fit`, the batched cost for the solver. |
-| `timbers.ensemble` | Uncertainty-aware objectives: `make_ensemble_cost` (four objectives; safety modes `prob`, `cvar`, `mean`), `score_members`, `member_series` and `perturbation_grid` for the forecast-error surrogate. |
+| `timbers.ensemble` | Uncertainty-aware objectives: `make_ensemble_cost` (four objectives; safety modes `prob`, `cvar`, `mean`; cost modes `mean`, `cvar`), `score_members`, `member_series`, `perturbation_grid` for the forecast-error surrogate, and `model_param_grid` / `model_draws` for power-model uncertainty. |
 | `timbers.cmaes` | GPU-native separable CMA-ES (`run`, `make_solver`); the fitness is injected. |
 | `timbers.polish` | Stage 2: `make_polisher`, gradient refinement of a converged route. |
 | `timbers.solve` | `solve_corridor`: every departure × seed in one chunked GPU dispatch, then exact scoring, selection and optional polish. |
@@ -108,6 +111,12 @@ same storm departure, then scores both across a forecast-error surrogate
 ensemble — showing the robust route trade a little nominal energy for a much
 lower chance of exceeding the wave limit.
 
+`examples/run_model_risk.py` makes the vessel, not the weather, uncertain: 18
+draws of the toy model's calm-water level, wave coefficient and speed exponent.
+It compares routes optimized for nominal, mean and CVaR energy and under a
+chance constraint on the shaft-power ceiling, and scores each across the draws,
+including the delay the ceiling causes.
+
 Tests: `pytest`. The suite is data-free — unit invariants plus an end-to-end run
 of the optimizer, the JAX evaluator, the host scorer, and the `solve_corridor`
 backend, all on synthetic grids with the toy power model.
@@ -119,6 +128,11 @@ backend, all on synthetic grids with the toy power model.
   `timbers.model.Grids`: `Grids.from_era5(wind, wave)` for a single field, or
   `Grids(wind, wave, steps)` for fields with a member axis.
 - **Power model**: implement `power_fn(tws, twa_deg, swh, mwa_deg, v, wps) -> kW`.
+  For power-model uncertainty, also accept one draw of its parameters as a
+  seventh argument, `power_fn(..., wps, params)`, and pass the draws to
+  `timbers.ensemble` as `model_params`; on the host, score one draw at a time
+  with `functools.partial(power_fn_host, params=draw)` over
+  `ensemble.model_draws(model_params)`.
   The device path (`timbers.model`/`timbers.optimizer`) calls it on JAX arrays;
   the host scorer (`timbers.scoring`) on NumPy arrays — `solve_corridor` and
   `make_polisher` take both (`power_fn`, `power_fn_host`).
