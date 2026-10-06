@@ -4,6 +4,7 @@ Properties under test, in increasing order of complexity:
 - the inversion matches the closed form where one exists (calm water);
 - the inverted speed respects the ceiling and is the largest that does;
 - with no ceiling the forward integrator reproduces the fixed-schedule scorer;
+- a ceiling the schedule never reaches changes nothing, at any speed;
 - a lower ceiling never gives an earlier arrival;
 - ``max_hours`` stops the voyage and reports where the ship got to.
 """
@@ -95,6 +96,20 @@ def test_no_ceiling_reproduces_the_fixed_schedule():
     assert r["arrived"] and abs(r["delay_h"]) < 1e-3  # float32 durations
     assert r["saturated_frac"] == 0.0
     assert r["energy_mwh"] == pytest.approx(ref["energy_mwh"], rel=1e-3)
+
+
+def test_unreached_ceiling_keeps_the_schedule_at_any_speed():
+    """The corridor is sailed at about 30 m/s, above ``v_max_for_power``'s
+    default bracket; a ceiling it never reaches must not slow it down."""
+    wind, wave = _grids()
+    lat, lon, seg = _route()
+    free = evaluate_route_saturated(wind, wave, DEP, lat, lon, seg, toy_power_np)
+    capped = evaluate_route_saturated(
+        wind, wave, DEP, lat, lon, seg, toy_power_np, p_max=1.01 * free["max_power_kw"]
+    )
+    assert capped["saturated_frac"] == 0.0
+    assert capped["actual_hours"] == pytest.approx(free["actual_hours"], abs=1e-9)
+    assert capped["energy_mwh"] == pytest.approx(free["energy_mwh"], rel=1e-12)
 
 
 def test_lower_ceiling_never_arrives_earlier():

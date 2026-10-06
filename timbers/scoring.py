@@ -312,10 +312,10 @@ def evaluate_route_saturated(
 
     def speed(tws, twa, hs, mwa, leg):
         v_cmd = v_cmd_leg[leg]
-        if not np.isfinite(p_max):
+        if not np.isfinite(p_max) or float(power_fn(tws, twa, hs, mwa, v_cmd, wps)) <= p_max:
             return v_cmd, False
-        v_cap = float(v_max_for_power(power_fn, tws, twa, hs, mwa, wps, p_max))
-        return min(v_cmd, v_cap), v_cap < v_cmd - 1e-9
+        # Bracketed by the commanded speed, which the ceiling does not allow.
+        return float(v_max_for_power(power_fn, tws, twa, hs, mwa, wps, p_max, v_hi=v_cmd)), True
 
     d = t_h = energy_kwh = 0.0
     n_sat = n_step = 0
