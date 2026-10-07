@@ -2,31 +2,36 @@
 
 Uses the synthetic storm scenario and the toy power model from ``run_toy.py``,
 with the weather taken as known and no seakeeping limits, so that only energy
-and the shaft-power ceiling are at stake. The power model's parameters are
-uncertain: the calm-water level (fouling), the added resistance in waves and
-the speed exponent of the hull term, 18 draws each held for the whole voyage
-(``ensemble.model_param_grid``, passed as ``model_params``). For one departure
-it optimizes four routes:
+and the shaft-power ceiling are at stake. The ship's model is the toy with a
+stronger wave term (``wave=4``, so that the storm adds tens of per cent to the
+power, not a few). Its uncertain parameters are the calm-water level, the wave
+coefficient and the speed exponent of the hull term, each on an axis centred on
+the nominal value, 27 draws held for the whole voyage
+(``ensemble.model_param_grid``, passed as ``model_params``).
 
-  * nominal   -- nominal energy with the nominal model;
-  * mean      -- expected energy over the draws (``objective="joint"``);
-  * cvar      -- the mean energy of the worst 20% of draws (``cost_mode="cvar"``);
-  * ceiling   -- nominal energy, with the share of draws that need more than
-    the shaft-power ceiling pushed toward 10% (``power_eps=0.1``).
+The design is fixed before the result is seen:
+
+* the ceiling is 95% of the peak power of the nominal plan under the nominal
+  model, so the nominal plan itself would have to slow down in the storm;
+* every route has 12 speed weights over the 48 h passage, so the speed profile
+  can resolve a storm a few hours long;
+* the routes form two groups. Three use the nominal model only: ``nominal``
+  ignores the ceiling, ``margin`` keeps clear of it with the soft penalty that
+  starts at 93% of it (``objective="deterministic"``), and ``ceiling`` holds
+  the nominal power under it (``chance_constrained``). Three use the draws:
+  ``draws``, nominal energy with a constraint on the share of draws that
+  breach the ceiling; ``draws mean``, the expected energy with that constraint
+  (``joint``); and ``draws cvar``, the mean energy of the worst 20% of draws
+  with it (``cost_mode="cvar"``). All constraints use ``safety_mode="cvar"``
+  with ``eps = 0.1``: the worst 10% of draws must stay within the ceiling.
 
 Each route is then scored over the same draws: on the device
-(``score_members``: energy for the nominal model, the mean and the CVaR over the
-draws, and the share of draws that reach the ceiling), and sailed on the host
-under the ceiling one draw at a time (``evaluate_route_saturated`` with
-``model_draws``), which gives the delay the ceiling causes.
+(``score_members``: nominal energy, the mean and CVaR20 over the draws, and the
+share of draws that reach the ceiling), and sailed on the host under the
+ceiling one draw at a time (``evaluate_route_saturated`` with ``model_draws``),
+which gives the delay the ceiling causes. Comparing the groups shows what the
+draws add over a plan that only knows the ceiling.
 
-What to expect: the spread is large (the mean is about 5% and the CVaR about
-11% above the nominal energy) but the routes barely move. The calm-water and
-wave scales enter the power linearly and average out of the mean; the hull term
-dominates, so no route avoids it. Only the ceiling, where it binds, changes the
-route, and only a little: the CVaR penalty is gentle for a small excess, and
-the slowdown it would prevent is minutes. The value here is the risk measured
-on the plan.
 NOTE: toy power model and constructed scenario, so the magnitudes are
 illustrative of the mechanism, not real-vessel numbers.
 
@@ -49,14 +54,16 @@ from timbers.model import Grids
 from timbers.scoring import evaluate_route_saturated
 from toy_power import toy_power_jax, toy_power_np
 
-NSP = 6
+NSP = 12
 HS_LIM = US_LIM = float("inf")  # no seakeeping limits: energy and the ceiling only
-P_MAX = 160_000.0  # shaft-power ceiling, kW
+CEILING_FRAC = 0.95  # of the nominal plan's peak power
 POP, ITERS, SEEDS = 64, 300, 4
 DEP = datetime(2024, 1, 1)
 
-# 18 draws; the nominal value first on every axis, so draw 0 is the nominal model.
-DRAWS = te.model_param_grid(calm=(1.0, 1.1), wave=(1.0, 0.6, 1.6), n=(3.0, 2.7, 3.3))
+# The nominal value first on every axis, so draw 0 is the nominal model, and
+# each axis symmetric about it, so the mean model is the nominal one.
+NOMINAL = te.model_param_grid(wave=(4.0,))
+DRAWS = te.model_param_grid(calm=(1.0, 0.9, 1.1), wave=(4.0, 2.0, 6.0), n=(3.0, 2.5, 3.5))
 
 
 def _land():
@@ -82,6 +89,7 @@ def _optimize(grids, land, x0, **kw):
         hs_lim=HS_LIM,
         tws_lim=US_LIM,
         safety_mode="cvar",
+        eps=0.1,
         **kw,
     )
     hp = jc.hyperparams(x0.size, POP)
@@ -90,7 +98,42 @@ def _optimize(grids, land, x0, **kw):
         jc.run(jnp.asarray(x0, jnp.float32), fit, 0.1, hp, POP, ITERS, jax.random.PRNGKey(s), cargs)
         for s in range(SEEDS)
     ]
-    return np.asarray(min(runs, key=lambda r: float(r[1]))[0])
+    theta = np.asarray(min(runs, key=lambda r: float(r[1]))[0])
+    return op.decode_route(theta, COR, K, L, NSP)
+
+
+def _score(grids, route, wind, wave, p_max):
+    lat, wlon, seg = route
+    m = te.score_members(
+        grids,
+        COR,
+        lat,
+        wlon,
+        seg,
+        wps=False,
+        power_fn=toy_power_jax,
+        align=ALIGN,
+        hs_lim=HS_LIM,
+        tws_lim=US_LIM,
+        p_lim=p_max,
+        model_params=DRAWS,
+    )
+    delays = np.array(
+        [
+            evaluate_route_saturated(
+                wind,
+                wave,
+                DEP,
+                lat,
+                op.working_to_signed(wlon),
+                seg,
+                partial(toy_power_np, params=d),
+                p_max=p_max,
+            )["delay_h"]
+            for d in te.model_draws(DRAWS)
+        ]
+    )
+    return m, np.maximum(delays, 0.0)
 
 
 def main():
@@ -99,60 +142,62 @@ def main():
     land = _land()
     x0 = op.gc_init_theta(COR, K, NSP)
 
-    # The routes differ only in how energy is reduced over the draws and whether
-    # the power ceiling is constrained. CVaR safety, as the ceiling is infeasible
-    # in some draws and "prob" would then not see by how much.
+    nominal = _optimize(grids, land, x0, objective="deterministic", model_params=NOMINAL)
+    lat, wlon, seg = nominal
+    peak = te.score_members(
+        grids,
+        COR,
+        lat,
+        wlon,
+        seg,
+        wps=False,
+        power_fn=toy_power_jax,
+        align=ALIGN,
+        hs_lim=HS_LIM,
+        tws_lim=US_LIM,
+        model_params=NOMINAL,
+    )["max_power"][0]
+    p_max = CEILING_FRAC * float(peak)
+
+    ceil = dict(p_lim=p_max)
     routes = {
-        "nominal": dict(objective="chance_constrained"),
-        "mean": dict(objective="joint", model_params=DRAWS),
-        "cvar": dict(objective="joint", model_params=DRAWS, cost_mode="cvar", cost_eps=0.2),
-        "ceiling": dict(
-            objective="chance_constrained", model_params=DRAWS, p_lim=P_MAX, power_eps=0.1
+        "nominal": nominal,
+        "margin": _optimize(
+            grids, land, x0, objective="deterministic", model_params=NOMINAL, **ceil
+        ),
+        "ceiling": _optimize(
+            grids, land, x0, objective="chance_constrained", model_params=NOMINAL, **ceil
+        ),
+        "draws": _optimize(
+            grids, land, x0, objective="chance_constrained", model_params=DRAWS, **ceil
+        ),
+        "draws mean": _optimize(grids, land, x0, objective="joint", model_params=DRAWS, **ceil),
+        "draws cvar": _optimize(
+            grids,
+            land,
+            x0,
+            objective="joint",
+            model_params=DRAWS,
+            cost_mode="cvar",
+            cost_eps=0.2,
+            **ceil,
         ),
     }
-    print(f"{len(te.model_draws(DRAWS))} power-model draws; ceiling {P_MAX / 1000:.0f} MW")
+
+    n = len(te.model_draws(DRAWS))
+    print(f"{n} power-model draws; ceiling {p_max / 1000:.1f} MW (95% of the nominal plan's peak)")
     print(
-        f"\n{'route':9}{'nom MWh':>9}{'mean MWh':>10}{'CVaR20':>9}"
-        f"{'P>ceil':>8}{'mean delay':>12}{'late>1h':>9}"
+        f"\n{'route':12}{'nom MWh':>9}{'mean MWh':>10}{'CVaR20':>9}{'P>ceil':>8}"
+        f"{'mean delay':>12}{'max delay':>11}{'late>1h':>9}"
     )
-    for name, kw in routes.items():
-        theta = _optimize(grids, land, x0, **kw)
-        lat, wlon, seg = op.decode_route(theta, COR, K, L, NSP)
-        m = te.score_members(
-            grids,
-            COR,
-            lat,
-            wlon,
-            seg,
-            wps=False,
-            power_fn=toy_power_jax,
-            align=ALIGN,
-            hs_lim=HS_LIM,
-            tws_lim=US_LIM,
-            p_lim=P_MAX,
-            model_params=DRAWS,
-        )
+    for name, route in routes.items():
+        m, delays = _score(grids, route, wind, wave, p_max)
         e = m["energy_mwh"]
         k = int(np.ceil(0.2 * e.size))
-        delays = np.array(
-            [
-                evaluate_route_saturated(
-                    wind,
-                    wave,
-                    DEP,
-                    lat,
-                    op.working_to_signed(wlon),
-                    seg,
-                    partial(toy_power_np, params=d),
-                    p_max=P_MAX,
-                )["delay_h"]
-                for d in te.model_draws(DRAWS)
-            ]
-        )
         print(
-            f"{name:9}{e[0]:>9.0f}{e.mean():>10.0f}{np.sort(e)[-k:].mean():>9.0f}"
+            f"{name:12}{e[0]:>9.0f}{e.mean():>10.0f}{np.sort(e)[-k:].mean():>9.0f}"
             f"{(m['power_margin'] > 0).mean():>8.0%}{delays.mean():>10.2f} h"
-            f"{(delays > 1.0).mean():>9.0%}"
+            f"{delays.max():>9.2f} h{(delays > 1.0).mean():>9.0%}"
         )
     print("\ntoy power model -- illustrative")
 

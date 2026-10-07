@@ -207,44 +207,59 @@ so the magnitudes are illustrative of the mechanism, not real-vessel numbers.
 same member axis: `model_params` holds draws of the power model's parameters
 (`model_param_grid` for a grid of them), each held for the whole voyage, and
 every (draw, weather member) pair becomes a member. The weather is interpolated
-once and only the power model is re-evaluated per draw. Three properties follow
-from how power enters the objective:
+once and only the power model is re-evaluated per draw. Draws count equally,
+as Monte Carlo samples; quadrature nodes or sigma points take `model_weights`.
+Three properties follow from how power enters the objective:
 
 - **The mean rarely moves the route.** Where power is linear in a parameter (a
   calm-water level for fouling, a coefficient on added resistance in waves),
   the mean energy over draws is the energy at the mean parameter, so
-  `expected_value` picks the route the mean model does. Only a parameter that
-  enters nonlinearly, such as the speed exponent, can move it.
+  `expected_value` picks the route of the mean model. That is the nominal
+  model only if the draws are centred on it. Only a parameter that enters
+  nonlinearly, such as the speed exponent, moves the route beyond that.
 - **A risk-averse cost uses the spread.** `cost_mode="cvar"` minimizes the mean
   energy of the worst `cost_eps` share of members.
 - **Power is never a seakeeping breach.** It reaches the safety term only
-  through the shaft-power ceiling, as its own chance constraint (`power_eps`),
-  not as part of the Hs/TWS margin. In one shared margin, a route that reaches
-  the ceiling in every member would breach the seakeeping limits at no extra
-  cost. Where the ceiling cannot be met in most draws, `safety_mode="cvar"`
-  still ranks routes by how far over it they go; `"prob"` saturates.
+  through the shaft-power ceiling `p_lim`: under an ensemble safety term
+  (`chance_constrained`, `joint` with `"prob"` or `"cvar"`) as a chance
+  constraint of its own, at level `power_eps` (`eps` by default), not as part
+  of the Hs/TWS margin. In one shared margin, a route that reaches the ceiling
+  in every member would breach the seakeeping limits at no extra cost. Under
+  `"cvar"` the level is a tail share: the worst `eps` of members must stay
+  within the ceiling, a stricter bound than a `"prob"` breach rate of `eps`.
 
-`examples/run_model_risk.py` takes the weather as known and the toy model's
-calm-water level (×1.0, 1.1), wave coefficient (×0.6–1.6) and speed exponent
-(2.7–3.3) as uncertain, 18 draws, with no seakeeping limits and a 160 MW
-ceiling. It sails each route under the ceiling once per draw:
+`examples/run_model_risk.py` takes the weather as known and the toy model,
+with a stronger wave term, as uncertain: calm-water level ×0.9–1.1, wave
+coefficient 2–6 (nominal 4) and speed exponent 2.5–3.5, 27 draws on axes
+centred on the nominal model, no seakeeping limits. The design is fixed in
+advance: the ceiling is 95% of the nominal plan's peak power, so that plan
+would have to slow down in the storm, and every route has 12 speed weights. It
+compares three routes that use the nominal model only (ignoring the ceiling,
+keeping clear of it with the deterministic soft margin, and holding the nominal
+power under it) with three that use the draws, then sails each under the
+ceiling once per draw:
 
 ```
-route      nom MWh  mean MWh   CVaR20  P>ceil  mean delay  late>1h
-nominal       6778      7118     7499     61%      0.02 h       0%
-mean          6778      7118     7499     61%      0.02 h       0%
-cvar          6778      7118     7499     56%      0.02 h       0%
-ceiling       6781      7122     7503     50%      0.03 h       0%
+route         nom MWh  mean MWh   CVaR20  P>ceil  mean delay  max delay  late>1h
+nominal          7105      7105     7881     56%      0.09 h     0.41 h       0%
+margin           7114      7114     7890     37%      0.02 h     0.19 h       0%
+ceiling          7107      7107     7883     48%      0.06 h     0.31 h       0%
+draws            7122      7123     7899      7%      0.01 h     0.03 h       0%
+draws mean       7122      7123     7898      7%      0.00 h     0.03 h       0%
+draws cvar       7121      7122     7898      7%      0.00 h     0.02 h       0%
 ```
 
-The spread is large: the mean is 5% and the CVaR20 11% above the nominal
-energy. The routes barely move. The hull term dominates and no route avoids it,
-and the ceiling constraint, the one term that binds, trades 3 MWh for a lower
-share of draws reaching the ceiling, against a slowdown of minutes. On this toy
-model, power-model uncertainty is mostly a matter of measuring a plan's risk
-rather than changing it. A real model with a stronger speed-dependent or
-weather-dependent spread, or a tighter ceiling, may differ; the machinery is the
-same.
+Knowing the draws is what pays: the three routes that use them cut the share
+of draws that reach the ceiling from 37–56% to 7% and the worst delay from
+0.2–0.4 h to 0.03 h, for 0.1–0.2% more nominal energy (8–17 MWh). The plain
+soft margin and a hard ceiling on the nominal model both leave most of the
+exposure, because they guard against the nominal ship, not the heavier draws.
+How the energy is reduced over the draws does not matter here: the mean is the
+nominal energy (linear parameters on centred axes), and CVaR20 picks the same
+route. Re-solving with other restarts reproduces the split (energies within
+5 MWh). The delays are minutes because the storm is short; the mechanism, not
+the magnitude, is the point. Same caveat as §5: toy power model on a
+constructed scenario.
 
 ## 5. TiMBERS vs BERS, head to head
 

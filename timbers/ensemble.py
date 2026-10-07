@@ -36,8 +36,9 @@ penalty over the surrogate.
 parameters, a pytree whose leaves share a leading draw axis (for example from
 ``model_param_grid``); the power model is then called as
 ``power_fn(tws, twa, swh, mwa, v, wps, params)`` with one draw. Every (draw,
-weather member) pair is a member, draw-major, all equally weighted, so draw 0
-should be the nominal model. The weather is interpolated once and only the power
+weather member) pair is a member, draw-major, so draw 0 should be the nominal
+model. Draws count equally, as Monte Carlo samples do; quadrature nodes or sigma
+points need their weights passed as ``model_weights``. The weather is interpolated once and only the power
 model is evaluated per draw, and the draws travel with the fields as traced
 data, so one compiled cost serves any draws of the same shape. Each draw holds
 for the whole voyage: model error is mostly about the ship (fouling, a wrong
@@ -46,12 +47,13 @@ average out along the route as independent noise per segment would.
 
 Two properties decide whether the draws change a route. Where power is linear in
 an uncertain parameter, the mean energy over draws is the energy at the mean
-parameter, so ``expected_value`` picks the route the mean model does; only a
-parameter that enters nonlinearly (a speed exponent) moves it. A risk-averse
+parameter, so ``expected_value`` picks the route of the mean model, which is the
+nominal one only if the draws are centred on it; only a parameter that enters
+nonlinearly (a speed exponent) moves it beyond that. A risk-averse
 reduction does use the spread: ``cost_mode="cvar"`` minimises the mean energy
 of the worst draws. And power enters the safety term only through the ceiling
-``p_lim``, never the seakeeping margins: ``power_eps`` adds a chance constraint
-on reaching it, a proxy for late arrival, which
+``p_lim``, never the seakeeping margins: under an ensemble safety term it is a
+chance constraint of its own (level ``power_eps``), a proxy for late arrival, which
 :func:`timbers.scoring.evaluate_route_saturated` measures one draw at a time
 (:func:`model_draws`).
 
@@ -143,27 +145,52 @@ def _as_params(model_params):
     return params
 
 
-def _members(fields, axes, segs, power_fn, wps, lon_wrap, perturbations, model_params=None):
-    """Power, Hs and TWS ``(member, segment)``.
-
-    With ``perturbations`` every (perturbation, grid member) pair is a member,
-    perturbation-major; with ``model_params`` every (draw, weather member) pair
-    is, draw-major. The weather is interpolated once and only the power model
-    is evaluated per draw.
-    """
-    if perturbations is None:
-        w = jm.weather(fields, axes, segs, lon_wrap)
-    else:
-        w = jax.vmap(lambda pt: jm.weather(fields, axes, segs, lon_wrap, pt))(
-            jnp.asarray(perturbations, jnp.float32)
-        )
-        w = jm.Weather(*(x.reshape(-1, x.shape[-1]) for x in w))
+def _as_weights(model_weights, model_params):
+    """``model_weights`` as a normalised ``(Q,)`` array, or None (equal weights)."""
+    if model_weights is None:
+        return None
     if model_params is None:
-        return jm.power(power_fn, w, segs.v, wps), w.swh, w.tws
-    p = jax.vmap(lambda prm: jm.power(power_fn, w, segs.v, wps, prm))(model_params)
-    q = p.shape[0]
-    tile = lambda x: jnp.broadcast_to(x, (q, *x.shape)).reshape(-1, x.shape[-1])  # noqa: E731
-    return p.reshape(-1, p.shape[-1]), tile(w.swh), tile(w.tws)
+        raise ValueError("model_weights needs model_params")
+    w = np.asarray(model_weights, np.float64)
+    q = jax.tree_util.tree_leaves(_as_params(model_params))[0].shape[0]
+    if w.shape != (q,) or not np.all(np.isfinite(w)) or np.any(w < 0) or w.sum() <= 0:
+        raise ValueError(f"model_weights must be {q} finite non-negative weights, not all zero")
+    return jnp.asarray(w / w.sum(), jnp.float32)
+
+
+def _weather_members(fields, axes, segs, lon_wrap, perturbations):
+    """Weather ``(weather member, segment)``: every (perturbation, grid member)
+    pair is a weather member, perturbation-major."""
+    if perturbations is None:
+        return jm.weather(fields, axes, segs, lon_wrap)
+    w = jax.vmap(lambda pt: jm.weather(fields, axes, segs, lon_wrap, pt))(
+        jnp.asarray(perturbations, jnp.float32)
+    )
+    return jm.Weather(*(x.reshape(-1, x.shape[-1]) for x in w))
+
+
+def _power_members(power_fn, w, v, wps, params):
+    """Power ``(member, segment)``; with ``params`` every (draw, weather member)
+    pair is a member, draw-major. The weather is evaluated once for all draws."""
+    if params is None:
+        return jm.power(power_fn, w, v, wps)
+    p = jax.vmap(lambda prm: jm.power(power_fn, w, v, wps, prm))(params)
+    return p.reshape(-1, p.shape[-1])
+
+
+def _member_weights(weights, n_weather):
+    """Per-member weights, draw-major, from per-draw ``weights`` (None: equal)."""
+    return None if weights is None else jnp.repeat(weights, n_weather) / n_weather
+
+
+def _members(fields, axes, segs, power_fn, wps, lon_wrap, perturbations, model_params=None):
+    """Power, Hs and TWS ``(member, segment)``, members as in
+    :func:`make_ensemble_cost`. Hs and TWS are repeated for every draw; a caller
+    that only reduces them should reduce before repeating."""
+    w = _weather_members(fields, axes, segs, lon_wrap, perturbations)
+    p = _power_members(power_fn, w, segs.v, wps, model_params)
+    q = p.shape[0] // w.swh.shape[0]
+    return p, jnp.tile(w.swh, (q, 1)), jnp.tile(w.tws, (q, 1))
 
 
 # --- building blocks ----------------------------------------------------------
@@ -181,15 +208,31 @@ def _sexp(x):
     return jnp.where(x <= _KNEE, lo, _KNEE_VAL * (1.0 + (x - _KNEE)))
 
 
-def _cvar(x, eps):
-    """Mean of the worst ``ceil(eps * M)`` members (CVaR at level 1 - eps)."""
-    k = max(1, int(np.ceil(eps * x.shape[-1])))
-    return jnp.mean(jnp.sort(x, axis=-1)[..., -k:], axis=-1)
+def _mean(x, w=None):
+    """Mean over members, weighted by ``w`` (normalised) if given."""
+    return jnp.mean(x, axis=-1) if w is None else jnp.sum(x * w, axis=-1)
 
 
-def _p_hat(margins, sharpness):
-    """Smoothed fraction of members whose margin is positive."""
-    return jnp.mean(jax.nn.sigmoid(sharpness * margins), axis=-1)
+def _cvar(x, eps, w=None):
+    """CVaR at level ``1 - eps``: the mean of the worst ``eps`` share of members.
+
+    Unweighted, the worst ``ceil(eps * M)`` members, so ``eps`` is resolved to
+    ``1 / M``. Weighted, the worst members up to probability mass ``eps``, the
+    last one counted in part.
+    """
+    if w is None:
+        k = max(1, int(np.ceil(eps * x.shape[-1])))
+        return jnp.mean(jax.lax.top_k(x, k)[0], axis=-1)
+    order = jnp.argsort(-x)
+    xs, ws = x[order], w[order]
+    before = jnp.cumsum(ws) - ws
+    take = jnp.clip(eps - before, 0.0, ws)
+    return jnp.sum(take * xs) / eps
+
+
+def _p_hat(margins, sharpness, w=None):
+    """Smoothed (weighted) fraction of members whose margin is positive."""
+    return _mean(jax.nn.sigmoid(sharpness * margins), w)
 
 
 def make_ensemble_cost(
@@ -216,6 +259,7 @@ def make_ensemble_cost(
     sharpness=50.0,
     perturbations=None,
     model_params=None,
+    model_weights=None,
     cost_mode="mean",
     cost_eps=0.1,
     power_eps=None,
@@ -247,26 +291,30 @@ def make_ensemble_cost(
     constrains the CVaR at level ``1 - eps`` of the member margins, the standard
     convex relaxation; it bounds the violation probability only when it is
     satisfied, and where the constraint is infeasible it measures tail severity
-    rather than frequency. ``eps`` is resolved only to ``1 / n_members``.
-    ``"mean"`` is the members' mean soft penalty, the expected exceedance; it
-    has no ``eps``.
+    rather than frequency: ``eps`` is then the tail share whose mean margin must
+    be at most zero, so the worst ``eps`` of members must all but meet the
+    limit, a stricter bound than ``"prob"`` with the same ``eps``. Unweighted,
+    ``eps`` is resolved only to ``1 / n_members``. ``"mean"`` is the members'
+    mean soft penalty, the expected exceedance; it has no ``eps``.
 
     ``perturbations`` (rows from :func:`perturbation_grid`) multiplies the
     members by a forecast-error surrogate, and ``model_params`` (draws of the
     power model's parameters, e.g. from :func:`model_param_grid`) by power-model
-    uncertainty; see the module docstring.
+    uncertainty; see the module docstring. The draws count equally unless
+    ``model_weights`` gives one weight per draw (quadrature or sigma-point
+    weights, normalised here); the weights enter every reduction over members.
 
-    Shaft power enters only the soft penalty, never the seakeeping margin: a
-    power excess makes a voyage slow, not unsafe, and is better represented as
-    late arrival (:func:`timbers.scoring.evaluate_route_saturated`).
-    ``power_eps`` (with a finite ``p_lim``, an ensemble safety term and
-    ``safety_mode`` ``"prob"`` or ``"cvar"``) adds a second constraint of the
-    same mode on the power margin ``max(P) / p_lim - 1``, with ``power_eps`` as
-    its level: a bound on how often the ceiling is reached, a proxy on the
-    device for the risk of arriving late. It is kept apart from the seakeeping
-    constraint so that one cannot be traded for the other: in one shared margin,
-    a route that reaches the ceiling in every member would breach the
-    seakeeping limits at no extra cost.
+    Shaft power never enters the seakeeping margin: a power excess makes a
+    voyage slow, not unsafe, and is better represented as late arrival
+    (:func:`timbers.scoring.evaluate_route_saturated`). A finite ``p_lim``
+    enters the soft penalty and, with an ensemble safety term under ``"prob"``
+    or ``"cvar"``, a second constraint of the same mode on the power margin
+    ``max(P) / p_lim - 1``: a bound on how often the ceiling is reached, a proxy
+    on the device for the risk of arriving late. Its level is ``power_eps``,
+    ``eps`` by default. It is kept apart from the seakeeping constraint so that
+    one cannot be traded for the other: in one shared margin, a route that
+    reaches the ceiling in every member would breach the seakeeping limits at
+    no extra cost.
 
     ``land`` is a :class:`timbers.optimizer.DeviceLand`; the land term is the
     summed raster along the route, zero at sea, and ``lam_land = 1e6`` makes it
@@ -292,6 +340,9 @@ def make_ensemble_cost(
             "'prob' or 'cvar'"
         )
     params = _as_params(model_params)
+    weights = _as_weights(model_weights, model_params)
+    model = None if params is None else (params, weights)
+    power_level = eps if power_eps is None else power_eps
 
     M = jm.n_points(cor.hours, align, quantise=True)
     # The penalties are sums over the M points while energy is time-weighted;
@@ -301,55 +352,63 @@ def make_ensemble_cost(
     lon_wrap = grids.lon_wrap
     finite_p = bool(np.isfinite(p_lim))
 
-    def chance(margins, level):
+    def chance(margins, level, w):
         """Penalty on the ensemble breaching ``margins`` > 0 beyond ``level``."""
         if safety_mode == "cvar":
-            excess = jnp.maximum(_cvar(margins, level), 0.0)
+            excess = jnp.maximum(_cvar(margins, level, w), 0.0)
         else:
-            excess = jnp.maximum(_p_hat(margins, sharpness) - level, 0.0)
+            excess = jnp.maximum(_p_hat(margins, sharpness, w) - level, 0.0)
         return _sexp(a_env * excess) - 1.0
 
-    def one(theta, dep_off, fields, axes, land_arrs, params):
+    def one(theta, dep_off, fields, axes, land_arrs, model):
+        params, weights = (None, None) if model is None else model
         lat, wlon, seg_dt = op.theta_to_track(theta, cor, K, L, n_speed)
         rlat, rlon, seg = jm.resample(lat, wlon, seg_dt, cor.hours, M)
         segs = jm.segments(rlat, rlon, seg, dep_off)
-        p, swh, tws = _members(fields, axes, segs, power_fn, wps, lon_wrap, perturbations, params)
+        w = _weather_members(fields, axes, segs, lon_wrap, perturbations)
+        p = _power_members(power_fn, w, segs.v, wps, params)
+        # The weather terms are reduced per weather member before being repeated
+        # for each draw, so the draws never hold copies of the weather series.
+        n_weather = w.swh.shape[0]
+        q = p.shape[0] // n_weather
+        mw = _member_weights(weights, n_weather)
 
         energies = jnp.sum(p * seg, axis=-1) / 1000.0
-        margins = jnp.maximum(jnp.max(swh, -1) / hs_lim, jnp.max(tws, -1) / tws_lim) - 1.0
-        terms = (
-            _sexp(a_env * jnp.maximum(swh / (soft_frac * hs_lim) - 1.0, 0.0))
-            + _sexp(a_env * jnp.maximum(tws / (soft_frac * tws_lim) - 1.0, 0.0))
+        margins = jnp.maximum(jnp.max(w.swh, -1) / hs_lim, jnp.max(w.tws, -1) / tws_lim) - 1.0
+        weather_terms = (
+            _sexp(a_env * jnp.maximum(w.swh / (soft_frac * hs_lim) - 1.0, 0.0))
+            + _sexp(a_env * jnp.maximum(w.tws / (soft_frac * tws_lim) - 1.0, 0.0))
             - 2.0
         )
+        softs = jnp.tile(pen_scale * jnp.sum(weather_terms, axis=-1), q)
         if finite_p:
-            terms = terms + _sexp(a_env * jnp.maximum(p / (soft_frac * p_lim) - 1.0, 0.0)) - 1.0
-        softs = pen_scale * jnp.sum(terms, axis=-1)
+            p_terms = _sexp(a_env * jnp.maximum(p / (soft_frac * p_lim) - 1.0, 0.0)) - 1.0
+            softs = softs + pen_scale * jnp.sum(p_terms, axis=-1)
 
         if not use_ensemble_cost:
             cost = energies[0]
         elif cost_mode == "cvar":
-            cost = _cvar(energies, cost_eps)
+            cost = _cvar(energies, cost_eps, mw)
         else:
-            cost = jnp.mean(energies)
+            cost = _mean(energies, mw)
         if not use_ensemble_safety:
             risk = softs[0]
         elif safety_mode == "mean":
-            risk = jnp.mean(softs)
+            risk = _mean(softs, mw)
         else:
-            risk = chance(margins, eps)
-            if power_eps is not None:
-                risk = risk + chance(jnp.max(p, -1) / p_lim - 1.0, power_eps)
+            risk = chance(jnp.tile(margins, q), eps, mw)
+            if finite_p:
+                risk = risk + chance(jnp.max(p, -1) / p_lim - 1.0, power_level, mw)
         p_land = pen_scale * op.land_term(land_arrs, rlat, rlon)
         return cost + lam_env * risk + lam_land * p_land
 
     batched = jax.jit(jax.vmap(one, in_axes=(0, None, None, None, None, None)))
 
     def fit(theta_batch, cargs):
-        dep_off, fields, axes, land_arrs, params = cargs
-        return batched(theta_batch, dep_off, fields, axes, land_arrs, params)
+        dep_off, fields, axes, land_arrs, model = cargs
+        return batched(theta_batch, dep_off, fields, axes, land_arrs, model)
 
-    return fit, (grids.fields, grids.axes, land.arrays, params)
+    return fit, (grids.fields, grids.axes, land.arrays, model)
 
 
 def score_members(
@@ -368,6 +427,7 @@ def score_members(
     dep_off=0.0,
     perturbations=None,
     model_params=None,
+    model_weights=None,
 ):
     """Per-member outcomes of a fixed route, sampled as the cost samples it.
 
@@ -380,7 +440,9 @@ def score_members(
     :func:`make_ensemble_cost`, which makes this the route's fragility under the
     surrogate. With ``model_params``, members are (draw, weather member) pairs,
     draw-major, and the spread of ``energy_mwh`` and ``power_margin`` includes
-    the power model's.
+    the power model's. ``weight`` gives each member's probability (equal unless
+    ``model_weights`` is given), for weighted statistics such as
+    ``(weight * (margin > 0)).sum()``.
     """
     M = jm.n_points(cor.hours, align, quantise=True)
 
@@ -388,10 +450,11 @@ def score_members(
     def run(lat, wlon, seg_dt, dep_off, fields, axes, params):
         rlat, rlon, seg = jm.resample(lat, wlon, seg_dt, cor.hours, M)
         segs = jm.segments(rlat, rlon, seg, dep_off)
-        p, swh, tws = _members(
-            fields, axes, segs, power_fn, wps, grids.lon_wrap, perturbations, params
-        )
-        max_hs, max_tws, max_p = jnp.max(swh, -1), jnp.max(tws, -1), jnp.max(p, -1)
+        w = _weather_members(fields, axes, segs, grids.lon_wrap, perturbations)
+        p = _power_members(power_fn, w, segs.v, wps, params)
+        q = p.shape[0] // w.swh.shape[0]
+        max_hs, max_tws = jnp.tile(jnp.max(w.swh, -1), q), jnp.tile(jnp.max(w.tws, -1), q)
+        max_p = jnp.max(p, -1)
         return (
             jnp.sum(p * seg, axis=-1) / 1000.0,
             max_hs,
@@ -412,7 +475,15 @@ def score_members(
         _as_params(model_params),
     )
     keys = ("energy_mwh", "max_hs", "max_tws", "max_power", "margin", "power_margin")
-    return {k: np.asarray(v) for k, v in zip(keys, out)}
+    res = {k: np.asarray(v) for k, v in zip(keys, out)}
+    n = res["energy_mwh"].size
+    weights = _as_weights(model_weights, model_params)
+    res["weight"] = (
+        np.full(n, 1.0 / n)
+        if weights is None
+        else np.repeat(np.asarray(weights), n // weights.size) / (n // weights.size)
+    )
+    return res
 
 
 def member_series(grids, t_h, lat, lon, *, wps, power_fn, pad_to=512, model_params=None):

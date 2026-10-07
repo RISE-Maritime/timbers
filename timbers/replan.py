@@ -186,7 +186,15 @@ def sail_with_replanning(
     # Plans are made in one continuous working longitude, starting at the
     # origin's, so a voyage across 180 is not sailed the long way round.
     d_wlon = o_lon + _wrap(d_lon - o_lon)
-    v_calm = float(v_max_for_power(power_fn_host, 0.0, 0.0, 0.0, 0.0, wps, p_max))
+    # Calm-water speed at the ceiling. The bracket grows until the ceiling binds
+    # (within bounds), so a ship faster than v_max_for_power's default bracket is
+    # not given a floor it does not need.
+    v_hi = 20.0
+    for _ in range(8):
+        if float(power_fn_host(0.0, 0.0, 0.0, 0.0, v_hi, wps)) > p_max:
+            break
+        v_hi *= 2.0
+    v_calm = float(v_max_for_power(power_fn_host, 0.0, 0.0, 0.0, 0.0, wps, p_max, v_hi=v_hi))
     if v_calm <= 0.0:
         raise ValueError(f"p_max = {p_max} kW cannot drive the ship at any speed in calm water")
     cost_kw = dict(

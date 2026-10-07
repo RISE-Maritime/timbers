@@ -385,24 +385,29 @@ def test_model_params_travel_as_traced_data():
         g, _land(), COR, objective="expected_value", model_params=a, **kw
     )
     theta = jnp.asarray(op.gc_init_theta(COR, K, NSP))[None, :]
-    swapped = float(fit(theta, (jnp.float32(0.0), *shared[:-1], te._as_params(b)))[0])
+    swapped = float(fit(theta, (jnp.float32(0.0), *shared[:-1], (te._as_params(b), None)))[0])
     assert swapped == pytest.approx(_fit(g, "expected_value", model_params=b), rel=1e-6)
     assert swapped > float(fit(theta, (jnp.float32(0.0), *shared))[0])
 
 
 def test_power_ceiling_is_its_own_chance_constraint():
-    """With ``power_eps``, a draw that needs more than ``p_lim`` counts as a
-    breach of a power constraint, though the weather is calm; and a breach of
-    the ceiling does not excuse a breach of the seakeeping limits."""
+    """Under an ensemble safety term, a draw that needs more than ``p_lim``
+    counts as a breach of a power constraint, though the weather is calm, with
+    ``power_eps`` as its level (``eps`` by default); and a breach of the ceiling
+    does not excuse a breach of the seakeeping limits."""
     g = Grids(*_members([1.0]), STEPS)
     draws = te.model_param_grid(calm=(1.0, 1.0, 1.6))
     p_max = float(_gc_members(g, model_params=draws)["max_power"][0])
     m = _gc_members(g, model_params=draws, p_lim=1.2 * p_max)
     assert list(m["power_margin"] > 0) == [False, False, True]
-    kw = dict(model_params=draws, p_lim=1.2 * p_max, eps=0.1)
-    off = _fit(g, "chance_constrained", **kw)
-    on = _fit(g, "chance_constrained", power_eps=0.1, **kw)
-    assert on > off + 1.0
+    none = _fit(g, "chance_constrained", model_params=draws, eps=0.1)
+    kw = dict(model_params=draws, p_lim=1.2 * p_max)
+    for mode in ("prob", "cvar"):
+        assert _fit(g, "chance_constrained", safety_mode=mode, eps=0.1, **kw) > none + 1.0
+    # One breaching draw in three is within power_eps = 0.5, and the soft
+    # penalty is not read by this objective, so the ceiling then costs nothing.
+    loose = _fit(g, "chance_constrained", eps=0.1, power_eps=0.5, **kw)
+    assert loose == pytest.approx(none, rel=1e-6)
 
     # Every draw over the ceiling: a storm on top must still cost more.
     kw = dict(model_params=draws, p_lim=0.5 * p_max, power_eps=0.1)
@@ -410,6 +415,41 @@ def test_power_ceiling_is_its_own_chance_constraint():
     storm = _fit(Grids(*_members([9.0]), STEPS), "chance_constrained", **kw)
     e = [_gc_members(Grids(*_members([h]), STEPS))["energy_mwh"][0] for h in (1.0, 9.0)]
     assert storm - calm > (e[1] - e[0]) + 1.0
+
+
+def test_draw_weights_enter_every_reduction():
+    """``model_weights`` weights the mean, the CVaR and the breach probability;
+    one-hot weights reduce the ensemble to that draw."""
+    g = Grids(*_members([2.0]), STEPS)
+    draws = te.model_param_grid(calm=(1.0, 1.2, 1.5))
+    e = _gc_members(g, model_params=draws)["energy_mwh"]
+    w = np.array([0.5, 0.3, 0.2])
+    mean = _fit(g, "expected_value", model_params=draws, model_weights=w)
+    assert mean == pytest.approx(np.average(e, weights=w), rel=1e-5)
+    one_hot = _fit(g, "expected_value", model_params=draws, model_weights=[0, 1, 0])
+    assert one_hot == pytest.approx(e[1], rel=1e-5)
+    # Weighted CVaR counts the worst members up to the mass eps, the last in part:
+    # with equal weights and eps = 0.5, all of the worst and half of the next.
+    cvar = _fit(
+        g,
+        "expected_value",
+        model_params=draws,
+        model_weights=np.ones(3),
+        cost_mode="cvar",
+        cost_eps=0.5,
+    )
+    assert cvar == pytest.approx((e[2] / 3 + e[1] / 6) / 0.5, rel=1e-5)
+
+    m = _gc_members(g, model_params=draws, model_weights=w)
+    np.testing.assert_allclose(m["weight"], w, rtol=1e-6)
+    assert _gc_members(g)["weight"] == pytest.approx([1.0])
+
+    # Breach probability: the one breaching draw carries weight 0.2 or 0.5.
+    p_max = float(m["max_power"][0])
+    kw = dict(model_params=draws, p_lim=1.3 * p_max, eps=0.1, power_eps=0.3)
+    light = _fit(g, "chance_constrained", model_weights=[0.4, 0.4, 0.2], **kw)
+    heavy = _fit(g, "chance_constrained", model_weights=[0.25, 0.25, 0.5], **kw)
+    assert light == pytest.approx(e[0], rel=1e-5) and heavy > light + 1.0
 
 
 def test_model_options_are_checked():
@@ -420,6 +460,10 @@ def test_model_options_are_checked():
         _fit(g, "expected_value", p_lim=1e5, power_eps=0.1)
     with pytest.raises(ValueError, match="needs an ensemble cost"):
         _fit(g, "deterministic", cost_mode="cvar")
+    with pytest.raises(ValueError, match="model_weights needs"):
+        _fit(g, "joint", model_weights=[1.0])
+    with pytest.raises(ValueError, match="model_weights must"):
+        _fit(g, "joint", model_params=te.model_param_grid(calm=(1.0, 2.0)), model_weights=[1.0])
     with pytest.raises(ValueError, match="leading"):
         _fit(g, "joint", model_params={"calm": np.ones(2), "wave": np.ones(3)})
 

@@ -50,8 +50,9 @@ out to be the first-order energy lever; global geometry is not.
    under the surrogate) and `member_series` per-segment values along a timed
    track. Uncertainty in the power model itself enters the same way: draws of
    its parameters (`model_params`, e.g. from `model_param_grid`) multiply the
-   members, with energy reduced by its mean or CVaR (`cost_mode`) and an
-   optional chance constraint on reaching the shaft-power ceiling (`power_eps`).
+   members (weighted by `model_weights` if they are not equally likely), with
+   energy reduced by its mean or CVaR (`cost_mode`) and a chance constraint on
+   reaching the shaft-power ceiling `p_lim` (level `power_eps`).
 6. **Re-planning** (`timbers.replan`). `sail_with_replanning` plans, sails one
    forecast cycle on the verifying weather under the power ceiling, and plans
    again from the realised position with the next forecast, keeping the
@@ -111,11 +112,12 @@ same storm departure, then scores both across a forecast-error surrogate
 ensemble — showing the robust route trade a little nominal energy for a much
 lower chance of exceeding the wave limit.
 
-`examples/run_model_risk.py` makes the vessel, not the weather, uncertain: 18
+`examples/run_model_risk.py` makes the vessel, not the weather, uncertain: 27
 draws of the toy model's calm-water level, wave coefficient and speed exponent.
-It compares routes optimized for nominal, mean and CVaR energy and under a
-chance constraint on the shaft-power ceiling, and scores each across the draws,
-including the delay the ceiling causes.
+It compares routes that know only the nominal model and a shaft-power ceiling
+with routes that know the draws, and sails each under the ceiling once per
+draw: the draws cut the share of draws that reach the ceiling from 37–56% to
+7% for 0.1–0.2% more energy.
 
 Tests: `pytest`. The suite is data-free — unit invariants plus an end-to-end run
 of the optimizer, the JAX evaluator, the host scorer, and the `solve_corridor`
