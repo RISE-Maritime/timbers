@@ -51,8 +51,9 @@ out to be the first-order energy lever; global geometry is not.
    track. Uncertainty in the power model itself enters the same way: draws of
    its parameters (`model_params`, e.g. from `model_param_grid`) multiply the
    members (weighted by `model_weights` if they are not equally likely), with
-   energy reduced by its mean or CVaR (`cost_mode`) and a chance constraint on
-   reaching the shaft-power ceiling `p_lim` (level `power_eps`).
+   energy reduced by its mean or CVaR (`cost_mode`) and, opt-in, a chance
+   constraint on reaching the shaft-power ceiling `p_lim` (`power_eps`). Every
+   objective pays the same nominal soft penalty for the ceiling.
 6. **Re-planning** (`timbers.replan`). `sail_with_replanning` plans, sails one
    forecast cycle on the verifying weather under the power ceiling, and plans
    again from the realised position with the next forecast, keeping the

@@ -390,23 +390,68 @@ def test_model_params_travel_as_traced_data():
     assert swapped > float(fit(theta, (jnp.float32(0.0), *shared))[0])
 
 
-def test_power_ceiling_is_its_own_chance_constraint():
-    """Under an ensemble safety term, a draw that needs more than ``p_lim``
-    counts as a breach of a power constraint, though the weather is calm, with
-    ``power_eps`` as its level (``eps`` by default); and a breach of the ceiling
-    does not excuse a breach of the seakeeping limits."""
+def test_ceiling_costs_and_cost_terms_match_main():
+    """``deterministic`` and ``expected_value`` cost what they did before power
+    uncertainty was added (values from main at 18c1b1c), with and without a
+    power ceiling; ``chance_constrained`` and ``joint`` match them without a
+    ceiling, and with one pay the same nominal soft power penalty (main
+    ignored the ceiling there). Seakeeping is within eps here, so the chance
+    term is zero."""
+    g = Grids(*_members([1.0, 4.0, 6.8]), STEPS)
+    rng = np.random.default_rng(3)
+    theta = np.tile(op.gc_init_theta(COR, K, NSP), (4, 1)).astype(np.float32)
+    theta[:, -NSP:] = rng.normal(0.0, 0.08, (4, NSP))
+    main = {
+        ("deterministic", False): [7374.592285, 7289.885254, 7440.042480, 7242.279297],
+        ("deterministic", True): [26636.042969, 14040.932617, 28386.826172, 9165.552734],
+        ("expected_value", False): [7662.017578, 7577.312012, 7727.467773, 7529.706055],
+        ("expected_value", True): [26923.466797, 14328.360352, 28674.250000, 9452.979492],
+    }
+    same_as = {"chance_constrained": "deterministic", "joint": "expected_value"}
+
+    def costs(objective, p_lim):
+        fit, shared = te.make_ensemble_cost(
+            g,
+            _land(),
+            COR,
+            objective=objective,
+            L=L,
+            K=K,
+            n_speed=NSP,
+            align=ALIGN,
+            wps=False,
+            power_fn=toy_power_jax,
+            p_lim=p_lim,
+            **LIMITS,
+        )
+        return np.asarray(fit(jnp.asarray(theta), (jnp.float32(0.0), *shared)))
+
+    for ceiling in (False, True):
+        p_lim = 160_000.0 if ceiling else float("inf")
+        for objective in te.OBJECTIVES:
+            ref = main[(same_as.get(objective, objective), ceiling)]
+            np.testing.assert_allclose(costs(objective, p_lim), ref, rtol=2e-6)
+
+
+def test_power_chance_constraint_is_opt_in():
+    """With ``power_eps``, a draw that needs more than ``p_lim`` counts as a
+    breach of a power constraint, though the weather is calm; without it only
+    the nominal soft penalty applies. A breach of the ceiling does not excuse a
+    breach of the seakeeping limits."""
     g = Grids(*_members([1.0]), STEPS)
     draws = te.model_param_grid(calm=(1.0, 1.0, 1.6))
     p_max = float(_gc_members(g, model_params=draws)["max_power"][0])
     m = _gc_members(g, model_params=draws, p_lim=1.2 * p_max)
     assert list(m["power_margin"] > 0) == [False, False, True]
     none = _fit(g, "chance_constrained", model_params=draws, eps=0.1)
-    kw = dict(model_params=draws, p_lim=1.2 * p_max)
+    kw = dict(model_params=draws, p_lim=1.2 * p_max, eps=0.1)
+    # Draw 0 stays below the soft knee: without power_eps the ceiling is free.
+    assert _fit(g, "chance_constrained", **kw) == pytest.approx(none, rel=1e-6)
     for mode in ("prob", "cvar"):
-        assert _fit(g, "chance_constrained", safety_mode=mode, eps=0.1, **kw) > none + 1.0
-    # One breaching draw in three is within power_eps = 0.5, and the soft
-    # penalty is not read by this objective, so the ceiling then costs nothing.
-    loose = _fit(g, "chance_constrained", eps=0.1, power_eps=0.5, **kw)
+        on = _fit(g, "chance_constrained", safety_mode=mode, power_eps=0.1, **kw)
+        assert on > none + 1.0
+    # One breaching draw in three is within power_eps = 0.5.
+    loose = _fit(g, "chance_constrained", power_eps=0.5, **kw)
     assert loose == pytest.approx(none, rel=1e-6)
 
     # Every draw over the ceiling: a storm on top must still cost more.

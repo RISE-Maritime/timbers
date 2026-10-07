@@ -220,13 +220,17 @@ Three properties follow from how power enters the objective:
 - **A risk-averse cost uses the spread.** `cost_mode="cvar"` minimizes the mean
   energy of the worst `cost_eps` share of members.
 - **Power is never a seakeeping breach.** It reaches the safety term only
-  through the shaft-power ceiling `p_lim`: under an ensemble safety term
-  (`chance_constrained`, `joint` with `"prob"` or `"cvar"`) as a chance
-  constraint of its own, at level `power_eps` (`eps` by default), not as part
-  of the Hs/TWS margin. In one shared margin, a route that reaches the ceiling
-  in every member would breach the seakeeping limits at no extra cost. Under
-  `"cvar"` the level is a tail share: the worst `eps` of members must stay
-  within the ceiling, a stricter bound than a `"prob"` breach rate of `eps`.
+  through the shaft-power ceiling `p_lim`, never as part of the Hs/TWS margin:
+  in one shared margin, a route that reaches the ceiling in every member would
+  breach the seakeeping limits at no extra cost. Every objective pays the
+  nominal member's soft power penalty (rising from `soft_frac` of the ceiling),
+  so all four treat the ceiling alike. Under an ensemble safety term
+  (`chance_constrained`, `joint` with `"prob"` or `"cvar"`), `power_eps` adds,
+  opt-in, a chance constraint on reaching the ceiling over the members. It has
+  its own level, not `eps`: under `"cvar"` the level is a tail share (the worst
+  `power_eps` of members must stay within the ceiling), stricter than a
+  `"prob"` breach rate and easily infeasible when the ceiling binds in most
+  members.
 
 `examples/run_model_risk.py` takes the weather as known and the toy model,
 with a stronger wave term, as uncertain: calm-water level ×0.9–1.1, wave
@@ -234,26 +238,25 @@ coefficient 2–6 (nominal 4) and speed exponent 2.5–3.5, 27 draws on axes
 centred on the nominal model, no seakeeping limits. The design is fixed in
 advance: the ceiling is 95% of the nominal plan's peak power, so that plan
 would have to slow down in the storm, and every route has 12 speed weights. It
-compares three routes that use the nominal model only (ignoring the ceiling,
-keeping clear of it with the deterministic soft margin, and holding the nominal
-power under it) with three that use the draws, then sails each under the
-ceiling once per draw:
+compares two routes that use the nominal model only (ignoring the ceiling, and
+keeping clear of it with the soft margin every objective pays) with three that
+add a chance constraint on the ceiling over the draws (`power_eps=0.1` under
+`"cvar"`), then sails each under the ceiling once per draw:
 
 ```
 route         nom MWh  mean MWh   CVaR20  P>ceil  mean delay  max delay  late>1h
 nominal          7105      7105     7881     56%      0.09 h     0.41 h       0%
 margin           7114      7114     7890     37%      0.02 h     0.19 h       0%
-ceiling          7107      7107     7883     48%      0.06 h     0.31 h       0%
-draws            7122      7123     7899      7%      0.01 h     0.03 h       0%
-draws mean       7122      7123     7898      7%      0.00 h     0.03 h       0%
-draws cvar       7121      7122     7898      7%      0.00 h     0.02 h       0%
+draws            7122      7122     7898      7%      0.00 h     0.02 h       0%
+draws mean       7122      7123     7898      7%      0.01 h     0.03 h       0%
+draws cvar       7121      7121     7897      7%      0.01 h     0.04 h       0%
 ```
 
 Knowing the draws is what pays: the three routes that use them cut the share
 of draws that reach the ceiling from 37–56% to 7% and the worst delay from
-0.2–0.4 h to 0.03 h, for 0.1–0.2% more nominal energy (8–17 MWh). The plain
-soft margin and a hard ceiling on the nominal model both leave most of the
-exposure, because they guard against the nominal ship, not the heavier draws.
+0.2–0.4 h to 0.02–0.04 h, for 0.1–0.2% more nominal energy (7–17 MWh). The
+plain soft margin on the nominal model leaves most of the
+exposure, because it guards against the nominal ship, not the heavier draws.
 How the energy is reduced over the draws does not matter here: the mean is the
 nominal energy (linear parameters on centred axes), and CVaR20 picks the same
 route. Re-solving with other restarts reproduces the split (energies within

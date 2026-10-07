@@ -52,8 +52,10 @@ nominal one only if the draws are centred on it; only a parameter that enters
 nonlinearly (a speed exponent) moves it beyond that. A risk-averse
 reduction does use the spread: ``cost_mode="cvar"`` minimises the mean energy
 of the worst draws. And power enters the safety term only through the ceiling
-``p_lim``, never the seakeeping margins: under an ensemble safety term it is a
-chance constraint of its own (level ``power_eps``), a proxy for late arrival, which
+``p_lim``, never the seakeeping margins. Every objective pays the nominal
+member's soft penalty for it; under an ensemble safety term ``power_eps`` adds,
+opt-in, a chance constraint of its own over the members, a proxy for late
+arrival, which
 :func:`timbers.scoring.evaluate_route_saturated` measures one draw at a time
 (:func:`model_draws`).
 
@@ -307,14 +309,20 @@ def make_ensemble_cost(
     Shaft power never enters the seakeeping margin: a power excess makes a
     voyage slow, not unsafe, and is better represented as late arrival
     (:func:`timbers.scoring.evaluate_route_saturated`). A finite ``p_lim``
-    enters the soft penalty and, with an ensemble safety term under ``"prob"``
-    or ``"cvar"``, a second constraint of the same mode on the power margin
-    ``max(P) / p_lim - 1``: a bound on how often the ceiling is reached, a proxy
-    on the device for the risk of arriving late. Its level is ``power_eps``,
-    ``eps`` by default. It is kept apart from the seakeeping constraint so that
-    one cannot be traded for the other: in one shared margin, a route that
-    reaches the ceiling in every member would breach the seakeeping limits at
-    no extra cost.
+    enters the soft penalty, and every objective pays it the same way: member
+    0's soft power penalty is part of the safety term of ``"prob"`` and
+    ``"cvar"`` too, beside their chance constraint on the seakeeping margins
+    (``"mean"`` averages the members' soft penalties, power included).
+    ``power_eps`` (opt-in; with an ensemble safety term under ``"prob"`` or
+    ``"cvar"``) adds a chance constraint of the same mode on the power margin
+    ``max(P) / p_lim - 1`` at level ``power_eps``: a bound on how often the
+    ceiling is reached over the members, a proxy on the device for the risk of
+    arriving late. Under ``"cvar"`` that level is a tail share, so a level that
+    suits the seakeeping constraint may be infeasible for power; it has no
+    default and is not tied to ``eps``. It is kept apart from the seakeeping
+    constraint so that one cannot be traded for the other: in one shared
+    margin, a route that reaches the ceiling in every member would breach the
+    seakeeping limits at no extra cost.
 
     ``land`` is a :class:`timbers.optimizer.DeviceLand`; the land term is the
     summed raster along the route, zero at sea, and ``lam_land = 1e6`` makes it
@@ -342,7 +350,6 @@ def make_ensemble_cost(
     params = _as_params(model_params)
     weights = _as_weights(model_weights, model_params)
     model = None if params is None else (params, weights)
-    power_level = eps if power_eps is None else power_eps
 
     M = jm.n_points(cor.hours, align, quantise=True)
     # The penalties are sums over the M points while energy is time-weighted;
@@ -383,7 +390,8 @@ def make_ensemble_cost(
         softs = jnp.tile(pen_scale * jnp.sum(weather_terms, axis=-1), q)
         if finite_p:
             p_terms = _sexp(a_env * jnp.maximum(p / (soft_frac * p_lim) - 1.0, 0.0)) - 1.0
-            softs = softs + pen_scale * jnp.sum(p_terms, axis=-1)
+            p_softs = pen_scale * jnp.sum(p_terms, axis=-1)
+            softs = softs + p_softs
 
         if not use_ensemble_cost:
             cost = energies[0]
@@ -398,7 +406,11 @@ def make_ensemble_cost(
         else:
             risk = chance(jnp.tile(margins, q), eps, mw)
             if finite_p:
-                risk = risk + chance(jnp.max(p, -1) / p_lim - 1.0, power_level, mw)
+                # The ceiling as every other objective pays it: member 0's soft
+                # penalty. A chance constraint on it only when asked for.
+                risk = risk + p_softs[0]
+                if power_eps is not None:
+                    risk = risk + chance(jnp.max(p, -1) / p_lim - 1.0, power_eps, mw)
         p_land = pen_scale * op.land_term(land_arrs, rlat, rlon)
         return cost + lam_env * risk + lam_land * p_land
 

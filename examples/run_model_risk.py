@@ -15,15 +15,15 @@ The design is fixed before the result is seen:
   model, so the nominal plan itself would have to slow down in the storm;
 * every route has 12 speed weights over the 48 h passage, so the speed profile
   can resolve a storm a few hours long;
-* the routes form two groups. Three use the nominal model only: ``nominal``
-  ignores the ceiling, ``margin`` keeps clear of it with the soft penalty that
-  starts at 93% of it (``objective="deterministic"``), and ``ceiling`` holds
-  the nominal power under it (``chance_constrained``). Three use the draws:
-  ``draws``, nominal energy with a constraint on the share of draws that
-  breach the ceiling; ``draws mean``, the expected energy with that constraint
-  (``joint``); and ``draws cvar``, the mean energy of the worst 20% of draws
-  with it (``cost_mode="cvar"``). All constraints use ``safety_mode="cvar"``
-  with ``eps = 0.1``: the worst 10% of draws must stay within the ceiling.
+* the routes form two groups. Two use the nominal model only: ``nominal``
+  ignores the ceiling, and ``margin`` keeps clear of it with the soft penalty
+  that starts at 93% of it, which every objective pays for a finite ``p_lim``.
+  Three use the draws and add, opt-in, a chance constraint on the ceiling over
+  them (``power_eps=0.1`` under ``safety_mode="cvar"``: the worst 10% of draws
+  must stay within the ceiling): ``draws``, nominal energy
+  (``chance_constrained``); ``draws mean``, the expected energy (``joint``);
+  and ``draws cvar``, the mean energy of the worst 20% of draws
+  (``cost_mode="cvar"``).
 
 Each route is then scored over the same draws: on the device
 (``score_members``: nominal energy, the mean and CVaR20 over the draws, and the
@@ -160,27 +160,22 @@ def main():
     p_max = CEILING_FRAC * float(peak)
 
     ceil = dict(p_lim=p_max)
+    drawn = dict(model_params=DRAWS, p_lim=p_max, power_eps=0.1)
     routes = {
         "nominal": nominal,
         "margin": _optimize(
             grids, land, x0, objective="deterministic", model_params=NOMINAL, **ceil
         ),
-        "ceiling": _optimize(
-            grids, land, x0, objective="chance_constrained", model_params=NOMINAL, **ceil
-        ),
-        "draws": _optimize(
-            grids, land, x0, objective="chance_constrained", model_params=DRAWS, **ceil
-        ),
-        "draws mean": _optimize(grids, land, x0, objective="joint", model_params=DRAWS, **ceil),
+        "draws": _optimize(grids, land, x0, objective="chance_constrained", **drawn),
+        "draws mean": _optimize(grids, land, x0, objective="joint", **drawn),
         "draws cvar": _optimize(
             grids,
             land,
             x0,
             objective="joint",
-            model_params=DRAWS,
             cost_mode="cvar",
             cost_eps=0.2,
-            **ceil,
+            **drawn,
         ),
     }
 
