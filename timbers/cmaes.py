@@ -128,9 +128,10 @@ def make_solver(fit, x0, sigma0, hp, popsize, maxiter):
     """Batched solver: solve(keys(B,2), dep_offs(B,), shared) -> best_x(B,dim), best_f(B).
 
     vmaps the whole sep-CMA scan over B = (seeds x departures) instances in ONE dispatch.
-    ``shared`` = the large grid arrays (fields, axes, land_arrs), passed UNMAPPED so they
-    are not replicated B times; only the per-instance key and dep_off are mapped. ``fit``
-    takes (X, cargs) with cargs=(dep_off, fields, axes, land_arrs).
+    ``shared`` = the cost's large arrays as its builder returns them (fields, axes,
+    land_arrs, ...), passed UNMAPPED so they are not replicated B times; only the
+    per-instance key and dep_off are mapped. ``fit`` takes (X, cargs) with
+    cargs=(dep_off, *shared).
     """
     x0 = jnp.asarray(x0, jnp.float32)
 

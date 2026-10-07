@@ -3,15 +3,19 @@
 
 Every cost and scorer on the device path is a reduction over :func:`sample`:
 the track is cut into segments, the weather is interpolated trilinearly at each
-segment's midpoint and mid-time for every ensemble member, and the injected
-power model gives the shaft power there. The optimizer's cost
+segment's midpoint and mid-time for every ensemble member (:func:`weather`), and
+the injected power model gives the shaft power there (:func:`power`). The two
+steps are separate so that the weather is interpolated once when the power model
+is evaluated for several draws of its parameters. The optimizer's cost
 (:mod:`timbers.optimizer`) reads one member; the ensemble objectives and
 scorers (:mod:`timbers.ensemble`) reduce over all of them. The physics mirrors
 the host scorer, ``timbers.scoring.evaluate_route_full``.
 
 The power model is not part of this library; pass your own ``power_fn`` with the
 signature ``power_fn(tws, twa_deg, swh, mwa_deg, v, wps) -> kW`` (operating on
-JAX arrays for this device path). See ``examples/toy_power.py``.
+JAX arrays for this device path). For power-model uncertainty it also takes
+one draw of its parameters, ``power_fn(..., wps, params)``; see
+:mod:`timbers.ensemble`. See ``examples/toy_power.py``.
 """
 
 from __future__ import annotations
@@ -252,13 +256,22 @@ def segments(lat, lon, seg_dt, dep_off, xp=jnp) -> Segments:
 # ---------------------------------------------------------------------------
 # Sampling
 # ---------------------------------------------------------------------------
-def sample(fields, axes, segs: Segments, power_fn, wps, lon_wrap: bool, perturbation=None):
-    """Shaft power (kW), Hs (m) and TWS (m/s) per member and segment.
+class Weather(NamedTuple):
+    """The power model's weather inputs, each ``(member, segment)``."""
+
+    tws: object  # true wind speed, m/s
+    twa: object  # true wind angle off the bow, degrees
+    swh: object  # significant wave height, m
+    mwa: object  # mean wave angle off the bow, degrees
+
+
+def weather(fields, axes, segs: Segments, lon_wrap: bool, perturbation=None) -> Weather:
+    """The weather each segment meets, for every member, relative to its heading.
 
     ``fields`` and ``axes`` are ``Grids.fields`` and ``Grids.axes``, passed
     explicitly so that a jitted caller can take them as traced arguments rather
     than closing over them (which would bake multi-GB arrays into the compiled
-    program as constants). Returns three ``(member, segment)`` arrays.
+    program as constants).
 
     ``perturbation`` is an optional ``(dlat, dlon, dt_h, hs_scale, wind_scale)``
     applied to where and when the weather is read, and to its amplitude; the
@@ -285,9 +298,30 @@ def sample(fields, axes, segs: Segments, power_fn, wps, lon_wrap: bool, perturba
         wind_from = jnp.mod(180.0 + jnp.degrees(jnp.arctan2(u10, v10)), 360.0)
         twa = jnp.mod(wind_from - segs.bearing, 360.0)
         mwa = jnp.mod(mwd - segs.bearing, 360.0)
-        return power_fn(tws, twa, swh, mwa, segs.v, wps), swh, tws
+        return Weather(tws, twa, swh, mwa)
 
     return jax.vmap(one)(*fields)
+
+
+def power(power_fn, w: Weather, v, wps, params=None):
+    """Shaft power (kW) per member and segment for the weather ``w``.
+
+    ``power_fn`` sees one member at a time, ``(segment,)`` arrays, as on the
+    host. With ``params`` (one draw of the power model's parameters, a pytree)
+    it is called as ``power_fn(tws, twa, swh, mwa, v, wps, params)``.
+    """
+    extra = () if params is None else (params,)
+    return jax.vmap(lambda tws, twa, swh, mwa: power_fn(tws, twa, swh, mwa, v, wps, *extra))(*w)
+
+
+def sample(fields, axes, segs: Segments, power_fn, wps, lon_wrap: bool, perturbation=None):
+    """Shaft power (kW), Hs (m) and TWS (m/s) per member and segment.
+
+    :func:`weather` followed by :func:`power` with the nominal power model.
+    Returns three ``(member, segment)`` arrays.
+    """
+    w = weather(fields, axes, segs, lon_wrap, perturbation)
+    return power(power_fn, w, segs.v, wps), w.swh, w.tws
 
 
 def route_energy(grids: Grids, lat, lon, seg_dt, dep_off, wps: bool, power_fn):
