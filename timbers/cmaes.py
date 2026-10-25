@@ -132,11 +132,15 @@ def make_solver(fit, x0, sigma0, hp, popsize, maxiter):
     land_arrs, ...), passed UNMAPPED so they are not replicated B times; only the
     per-instance key and dep_off are mapped. ``fit`` takes (X, cargs) with
     cargs=(dep_off, *shared).
+
+    ``x0`` (dim,) and ``sigma0`` are the defaults for every instance. Pass
+    ``x0s`` (B, dim) and/or ``sigma0s`` (B,) to ``solve`` to start each instance
+    from its own point and step, e.g. to mix warm and cold restarts in one dispatch.
     """
     x0 = jnp.asarray(x0, jnp.float32)
 
-    def single(key, dep_off, shared):
-        state = init_state(x0, sigma0, x0.shape[0], key)
+    def single(key, dep_off, x0_i, sigma_i, shared):
+        state = init_state(x0_i, sigma_i, x0_i.shape[0], key)
         cargs = (dep_off,) + tuple(shared)
 
         def body(st, _):
@@ -145,4 +149,14 @@ def make_solver(fit, x0, sigma0, hp, popsize, maxiter):
         final, _ = jax.lax.scan(body, state, None, length=maxiter)
         return final["best_x"], final["best_f"]
 
-    return jax.jit(jax.vmap(single, in_axes=(0, 0, None)))
+    batched = jax.jit(jax.vmap(single, in_axes=(0, 0, 0, 0, None)))
+
+    def solve(keys, dep_offs, shared, x0s=None, sigma0s=None):
+        B = keys.shape[0]
+        x0s = jnp.broadcast_to(x0, (B, x0.shape[0])) if x0s is None else x0s
+        sigma0s = jnp.full((B,), sigma0, jnp.float32) if sigma0s is None else sigma0s
+        return batched(
+            keys, dep_offs, jnp.asarray(x0s, jnp.float32), jnp.asarray(sigma0s, jnp.float32), shared
+        )
+
+    return solve

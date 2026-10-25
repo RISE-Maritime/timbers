@@ -399,7 +399,8 @@ def test_ceiling_costs_and_cost_terms_match_main():
     term is zero."""
     g = Grids(*_members([1.0, 4.0, 6.8]), STEPS)
     rng = np.random.default_rng(3)
-    theta = np.tile(op.gc_init_theta(COR, K, NSP), (4, 1)).astype(np.float32)
+    # The v0.1 start the reference values were computed on (gc_init_theta then).
+    theta = np.tile(op.chord_init_theta(COR, K, NSP), (4, 1)).astype(np.float32)
     theta[:, -NSP:] = rng.normal(0.0, 0.08, (4, NSP))
     main = {
         ("deterministic", False): [7374.592285, 7289.885254, 7440.042480, 7242.279297],
@@ -430,7 +431,8 @@ def test_ceiling_costs_and_cost_terms_match_main():
         p_lim = 160_000.0 if ceiling else float("inf")
         for objective in te.OBJECTIVES:
             ref = main[(same_as.get(objective, objective), ceiling)]
-            np.testing.assert_allclose(costs(objective, p_lim), ref, rtol=2e-6)
+            # float32 sums: reduction order changes between JAX releases (3.6e-6 on 0.12).
+            np.testing.assert_allclose(costs(objective, p_lim), ref, rtol=1e-5)
 
 
 def test_power_chance_constraint_is_opt_in():

@@ -54,6 +54,25 @@ ensemble-safety objectives; on a summer departure all were within 1.01.
 When comparing formulations, use a budget at which all of them converge, or
 report the restart spread with the result.
 
+Cold restarts start on the great circle (`init="gc"`, the default since v0.2),
+on the v0.1 straight chord in the normalized frame (`init="chord"`), or on the
+great circle bent alternately north and south (`init="spread"`). On a 2024
+study of 92 North Atlantic hindsight cases (both directions, with and without
+sails, `K = 20`, `L = 100`, `n_speed = 64`, 8 restarts of 300 iterations) the
+three agree: total energy within 0.3%, the per-case median difference 0.0%, and
+the restarts of a case agree with each other (median 1.004 times the best).
+Against an exact graph optimum of the same problem the cold starts are within
+3% in the median but more than 5% worse in about 40% of cases; a different cold
+start does not close that gap, a warm start does. `solve_corridor(seed_tracks=...)`
+fits each given route with `optimizer.fit_theta_to_track` and runs it as one of
+the restarts at the small step `sigma_warm` (default 0.02, against `sigma0 =
+0.1` cold), so the search refines the seed's basin instead of leaving it; the
+fitted seed is also scored as a candidate. On seven flagged cases one restart
+seeded from the graph optimum, beside seven cold ones, cut the energy by 13 to
+58% against the best cold start, ending within 6% of the graph optimum and
+below it in four (the optimum is on a lattice, the seeded route continuous). At
+the cold step the same seed drifts back to the cold-start result. Each result reports every restart's cost and route (`restarts`).
+
 **E. Gradient local-refinement polish (supersedes FMS).** Per-waypoint lateral
 offset along the route normal + co-refined speed, gentle Adam, curvature
 regularization, keeping the best *scored-feasible* iterate

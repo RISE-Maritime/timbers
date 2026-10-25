@@ -46,18 +46,40 @@ MAX_LEGS = 100  # bounds a voyage that never arrives
 
 
 def _plan(
-    grids, land, cor, dep_off, *, objective, K, L, n_speed, seeds, iters, pop, sigma0, cost_kw
+    grids,
+    land,
+    cor,
+    dep_off,
+    *,
+    objective,
+    K,
+    L,
+    n_speed,
+    seeds,
+    iters,
+    pop,
+    sigma0,
+    init,
+    spread,
+    cost_kw,
 ):
-    """Best of ``seeds`` sep-CMA-ES restarts from the great-circle chord."""
+    """Best of ``seeds`` sep-CMA-ES restarts from ``op.init_thetas(..., init, spread)``."""
     fit, shared = make_ensemble_cost(
         grids, land, cor, objective=objective, L=L, K=K, n_speed=n_speed, **cost_kw
     )
     hp = jc.hyperparams(2 * (K - 2) + n_speed, pop)
-    x0 = jnp.asarray(op.gc_init_theta(cor, K, n_speed), jnp.float32)
+    x0s = jnp.asarray(op.init_thetas(cor, K, n_speed, seeds, init, spread), jnp.float32)
     best, best_j = None, np.inf
     for s in range(seeds):
         bx, bf = jc.run(
-            x0, fit, sigma0, hp, pop, iters, jax.random.PRNGKey(s), (jnp.float32(dep_off), *shared)
+            x0s[s],
+            fit,
+            sigma0,
+            hp,
+            pop,
+            iters,
+            jax.random.PRNGKey(s),
+            (jnp.float32(dep_off), *shared),
         )
         if float(bf) < best_j:
             best, best_j = np.asarray(bx), float(bf)
@@ -112,6 +134,8 @@ def sail_with_replanning(
     iters=300,
     pop=64,
     sigma0=0.1,
+    init="gc",
+    spread=0.15,
     record_promise=False,
     clear_jax_caches=False,
     verbose=False,
@@ -161,8 +185,10 @@ def sail_with_replanning(
     K, L, n_speed, align, wps, eps, **cost_kw
         Passed to :func:`timbers.ensemble.make_ensemble_cost`, with the same
         values for every leg.
-    seeds, iters, pop, sigma0
-        Each plan is the best of ``seeds`` sep-CMA-ES restarts.
+    seeds, iters, pop, sigma0, init, spread
+        Each plan is the best of ``seeds`` sep-CMA-ES restarts, started from
+        :func:`timbers.optimizer.init_thetas` on that plan's corridor
+        (``init="chord"`` reproduces v0.1).
     record_promise : bool
         Per leg, the share of members in which the plan breaches a limit over
         the window it is then sailed (``p_hat`` in each leg record). Each leg
@@ -245,6 +271,8 @@ def sail_with_replanning(
             iters=iters,
             pop=pop,
             sigma0=sigma0,
+            init=init,
+            spread=spread,
             cost_kw=cost_kw,
         )
         rlat, rwlon, seg = op.decode_route(best, cor, K, L, n_speed)

@@ -61,7 +61,8 @@ out to be the first-order energy lever; global geometry is not.
    `model.Grids`, so archived ensembles, a single forecast and the verifying
    field itself (hindsight) all fit. `optimizer.fit_theta_to_track` projects a
    timed track onto the Bezier family, to seed the optimizer or to measure
-   whether one curve can represent it.
+   whether one curve can represent it; `solve_corridor(seed_tracks=...)` uses
+   it to warm-start restarts from known routes at a small step (`sigma_warm`).
 
 Details, design rationale, and negative results: [docs/method.md](docs/method.md).
 
