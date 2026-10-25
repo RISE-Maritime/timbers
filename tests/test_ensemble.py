@@ -431,7 +431,8 @@ def test_ceiling_costs_and_cost_terms_match_main():
         p_lim = 160_000.0 if ceiling else float("inf")
         for objective in te.OBJECTIVES:
             ref = main[(same_as.get(objective, objective), ceiling)]
-            np.testing.assert_allclose(costs(objective, p_lim), ref, rtol=2e-6)
+            # float32 sums: reduction order changes between JAX releases (3.6e-6 on 0.12).
+            np.testing.assert_allclose(costs(objective, p_lim), ref, rtol=1e-5)
 
 
 def test_power_chance_constraint_is_opt_in():
