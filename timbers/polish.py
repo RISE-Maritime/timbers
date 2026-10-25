@@ -37,13 +37,16 @@ def make_polisher(
     lr0=3e-3,
     clip=0.05,
     lam_s=3e4,
+    land_sub=None,
 ):
     """``power_fn`` is the device (JAX) power model used in the gradient cost;
     ``power_fn_host`` is the NumPy power model used by the host scorer that picks
-    the best scored-feasible iterate."""
+    the best scored-feasible iterate. ``land_sub`` is as in :func:`timbers.optimizer.build_fit`."""
     n_geo = 2 * (K - 2)
     FIELDS, AXES, LAND = grids.fields, grids.axes, land.arrays
     lon_wrap = grids.lon_wrap
+    if land_sub is None:
+        land_sub = op.land_substeps(cor, land, op.track_segments(cor, L, ALIGN))
     end_mask = jnp.ones(L).at[0].set(0.0).at[-1].set(0.0)
 
     def cost(p, dep_off, P0, normals, fields, axes, land_arrs):
@@ -65,6 +68,7 @@ def make_polisher(
             power_fn,
             ALIGN,
             lon_wrap,
+            land_sub,
         )
         curv = d[2:] - 2 * d[1:-1] + d[:-2]
         return c + lam_s * jnp.sum(curv**2)

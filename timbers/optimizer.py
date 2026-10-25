@@ -26,7 +26,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from . import model as jm
-from .geo import to_grid_lon
+from .geo import haversine_m, to_grid_lon
 
 jax.config.update("jax_enable_x64", False)
 
@@ -86,26 +86,54 @@ class DeviceLand:
         self.lat = jnp.asarray(land["lat"], jnp.float32)
         self.wlon = jnp.asarray(land["wlon"], jnp.float32)
         self.mask = jnp.asarray(land["mask"], jnp.float32)  # (Y,X), 0 at sea
+        # Smallest cell side in nautical miles, east-west at the raster's
+        # highest latitude: the spacing at which a track cannot step over a cell.
+        lat_h, wlon_h = np.asarray(land["lat"], float), np.asarray(land["wlon"], float)
+        coslat = np.cos(np.radians(min(np.abs(lat_h).max(), 89.0)))
+        self.cell_nm = 60.0 * min(abs(lat_h[1] - lat_h[0]), abs(wlon_h[1] - wlon_h[0]) * coslat)
 
     @property
     def arrays(self):
         return (self.mask, self.lat, self.wlon)
 
 
-def land_term(land_arrs, lat, wlon):
+def land_substeps(cor, land, n_seg, slack=1.5):
+    """Samples per track segment that keep the land check at most one raster
+    cell apart: ``n_seg`` segments over ``slack`` times the great-circle
+    distance between the ports (for detours and uneven speed)."""
+    dist_nm = haversine_m(cor.o_lat, cor.o_wlon, cor.d_lat, cor.d_wlon) / 1852.0
+    return max(1, math.ceil(slack * dist_nm / n_seg / land.cell_nm))
+
+
+def land_term(land_arrs, lat, wlon, sub=1):
     """Summed exclusion raster along a track, bilinearly sampled.
 
     The end points are the fixed ports, identical for every candidate, so they
     are left out: a port touching the raster would add a constant that, at a
     hard-constraint weight in float32, rounds away small energy differences.
+
+    ``sub`` > 1 also samples ``sub - 1`` evenly spaced points inside each segment
+    between interior points, so that a narrow cape or shoal between two track
+    points is seen (see :func:`land_substeps`); the sum is divided by ``sub`` to
+    keep its scale. The two port legs are not subdivided, as the ports are left
+    out. ``sub=1`` samples the track points only, as in v0.1.
     """
     mask, lat_ax, wlon_ax = land_arrs
-    lat, wlon = lat[1:-1], wlon[1:-1]
+    if sub > 1:  # Python-level: sub is static
+        fr = jnp.arange(1, sub, dtype=lat.dtype) / sub
+        a_lat, a_wlon = lat[1:-2, None], wlon[1:-2, None]
+        mid_lat = (a_lat + fr * (lat[2:-1, None] - a_lat)).ravel()
+        mid_wlon = (a_wlon + fr * (wlon[2:-1, None] - a_wlon)).ravel()
+        lat = jnp.concatenate([lat[1:-1], mid_lat])
+        wlon = jnp.concatenate([wlon[1:-1], mid_wlon])
+    else:
+        lat, wlon = lat[1:-1], wlon[1:-1]
     yi, yf = jm._frac(lat_ax, lat)
     xi, xf = jm._frac(wlon_ax, wlon)
     c0 = mask[yi, xi] * (1 - xf) + mask[yi, xi + 1] * xf
     c1 = mask[yi + 1, xi] * (1 - xf) + mask[yi + 1, xi + 1] * xf
-    return jnp.sum(c0 * (1 - yf) + c1 * yf)
+    total = jnp.sum(c0 * (1 - yf) + c1 * yf)
+    return total / sub if sub > 1 else total
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +183,7 @@ def _route_cost(
     power_fn,
     align: float,
     lon_wrap: bool,
+    land_sub: int = 1,
 ):
     """Penalized cost of one track: ``(cost, energy, p_env, p_land)``.
 
@@ -164,7 +193,7 @@ def _route_cost(
     0.25 h) and energy and Hs are integrated there, so the optimized quantity is
     the scored one and the Hs penalty sees the sub-segment peaks the scorer
     sees. With 0, the cost integrates on the native segments. Only the first
-    member of the grids is read.
+    member of the grids is read. ``land_sub`` is :func:`land_term`'s ``sub``.
     """
     if align > 0.0:
         lat, wlon, seg_dt = jm.resample(lat, wlon, seg_dt, cor.hours, jm.n_points(cor.hours, align))
@@ -180,7 +209,7 @@ def _route_cost(
         over_p = jnp.maximum(p / pen.p_soft - 1.0, 0.0)
         p_env = p_env + jnp.sum(jnp.exp(pen.aP * over_p) - 1.0)
 
-    p_land = land_term(land_arrs, lat, wlon)
+    p_land = land_term(land_arrs, lat, wlon, land_sub)
     cost = energy + pen.lambda_env * p_env + pen.lambda_land * p_land
     return cost, energy, p_env, p_land
 
@@ -228,7 +257,7 @@ def theta_to_track(theta, cor, K, L, n_speed=0):
 # ---------------------------------------------------------------------------
 # Batched penalized cost
 # ---------------------------------------------------------------------------
-def build_fit(cor, grids, land, pen, K, n_speed, L, align, wps, power_fn):
+def build_fit(cor, grids, land, pen, K, n_speed, L, align, wps, power_fn, land_sub=None):
     """Return ``(fit, shared)``: the batched cost for :mod:`timbers.cmaes`.
 
     ``fit(theta_batch, cargs)`` with ``cargs = (dep_off, *shared)`` returns the
@@ -237,9 +266,12 @@ def build_fit(cor, grids, land, pen, K, n_speed, L, align, wps, power_fn):
     read) and ``land`` a :class:`DeviceLand`. The large arrays travel in
     ``shared`` as traced arguments rather than being closed over, so they are
     not baked into the compiled program as constants, and one compilation per
-    (corridor, wps) serves every departure.
+    (corridor, wps) serves every departure. ``land_sub`` is :func:`land_term`'s
+    ``sub``; ``None`` picks it with :func:`land_substeps`.
     """
     lon_wrap = grids.lon_wrap
+    if land_sub is None:
+        land_sub = land_substeps(cor, land, track_segments(cor, L, align))
 
     def one(theta, dep_off, fields, axes, land_arrs):
         lat, wlon, seg_dt = theta_to_track(theta, cor, K, L, n_speed)
@@ -257,6 +289,7 @@ def build_fit(cor, grids, land, pen, K, n_speed, L, align, wps, power_fn):
             power_fn,
             align,
             lon_wrap,
+            land_sub,
         )
         return cost
 
@@ -267,6 +300,12 @@ def build_fit(cor, grids, land, pen, K, n_speed, L, align, wps, power_fn):
         return batched(theta_batch, dep_off, fields, axes, land_arrs)
 
     return fit, (grids.fields, grids.axes, land.arrays)
+
+
+def track_segments(cor, L, align):
+    """Segments of the track the cost samples: the uniform time grid with
+    ``align`` > 0 (see :func:`timbers.model.resample`), else the L-1 Bezier ones."""
+    return jm.n_points(cor.hours, align) if align > 0.0 else L - 1
 
 
 def decode_route(theta, cor, K, L, n_speed=0):

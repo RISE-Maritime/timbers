@@ -203,3 +203,57 @@ def test_port_on_land_keeps_cost_resolution():
     on_land, free = _costs(land, theta), _costs(sea, theta)
     assert len(np.unique(free)) == 64
     np.testing.assert_array_equal(on_land, free)
+
+
+def _spit_between_waypoints():
+    """One raster cell of land halfway between two waypoints of the start route,
+    more than two cells from either, and the same raster with no land."""
+    llat = np.arange(35.0, 50.001, 0.25)
+    lwlon = np.arange(-75.0, 5.001, 0.25)
+    lat, wlon, _ = op.decode_route(op.gc_init_theta(COR, K, NSP), COR, K, L, NSP)
+    j = L // 2
+    mask = np.zeros((llat.size, lwlon.size), np.float32)
+    mask[
+        np.abs(llat - (lat[j] + lat[j + 1]) / 2).argmin(),
+        np.abs(lwlon - (wlon[j] + wlon[j + 1]) / 2).argmin(),
+    ] = 1.0
+    return _raster(mask, llat, lwlon), _raster(np.zeros_like(mask), llat, lwlon)
+
+
+def _cost_sub(raster, land_sub):
+    fit, shared = op.build_fit(
+        COR,
+        _grids(),
+        op.DeviceLand(raster),
+        op.Penalty(),
+        K,
+        NSP,
+        L,
+        0.0,
+        False,
+        toy_power_jax,
+        land_sub=land_sub,
+    )
+    theta = jnp.asarray(op.gc_init_theta(COR, K, NSP), jnp.float32)[None]
+    return float(fit(theta, (jnp.float32(0.0), *shared))[0])
+
+
+def test_land_between_track_points_is_seen():
+    """A spit between two waypoints is invisible at the waypoints alone (v0.1,
+    ``land_sub=1``) and costs a hard-constraint price with the default check."""
+    spit, sea = _spit_between_waypoints()
+    assert _cost_sub(spit, 1) == _cost_sub(sea, 1)
+    assert _cost_sub(spit, None) - _cost_sub(sea, None) > 1e3
+    assert _cost_sub(sea, None) == pytest.approx(_cost_sub(sea, 1))
+
+
+def test_land_substeps_keep_samples_a_cell_apart():
+    llat = np.arange(35.0, 50.001, 0.25)
+    lwlon = np.arange(-75.0, 5.001, 0.25)
+    land = op.DeviceLand(_raster(np.zeros((llat.size, lwlon.size)), llat, lwlon))
+    assert land.cell_nm == pytest.approx(60 * 0.25 * np.cos(np.radians(50.0)))
+    gc_nm = 2826.0  # COR, great circle
+    for n_seg in (39, 192, 1416):
+        sub = op.land_substeps(COR, land, n_seg)
+        assert 1.5 * gc_nm / n_seg / sub <= land.cell_nm * 1.001
+    assert op.land_substeps(COR, land, 10**6) == 1

@@ -265,6 +265,7 @@ def make_ensemble_cost(
     cost_mode="mean",
     cost_eps=0.1,
     power_eps=None,
+    land_sub=None,
 ):
     """Return ``(fit, shared)`` for :func:`timbers.cmaes.run`.
 
@@ -326,7 +327,10 @@ def make_ensemble_cost(
 
     ``land`` is a :class:`timbers.optimizer.DeviceLand`; the land term is the
     summed raster along the route, zero at sea, and ``lam_land = 1e6`` makes it
-    a hard constraint under rank-based selection.
+    a hard constraint under rank-based selection. ``land_sub`` is
+    :func:`timbers.optimizer.land_term`'s ``sub``; ``None`` checks land at most
+    one raster cell apart (:func:`timbers.optimizer.land_substeps`), 1 at the
+    resampled track points only, as in v0.1.
     """
     if objective not in OBJECTIVES:
         raise ValueError(f"unknown objective {objective!r}; one of {OBJECTIVES}")
@@ -356,6 +360,8 @@ def make_ensemble_cost(
     # rescaling by the M the requested align implies keeps the penalty weight
     # independent of where M lands on the ladder.
     pen_scale = (cor.hours / align) / M
+    if land_sub is None:
+        land_sub = op.land_substeps(cor, land, M)
     lon_wrap = grids.lon_wrap
     finite_p = bool(np.isfinite(p_lim))
 
@@ -411,7 +417,7 @@ def make_ensemble_cost(
                 risk = risk + p_softs[0]
                 if power_eps is not None:
                     risk = risk + chance(jnp.max(p, -1) / p_lim - 1.0, power_eps, mw)
-        p_land = pen_scale * op.land_term(land_arrs, rlat, rlon)
+        p_land = pen_scale * op.land_term(land_arrs, rlat, rlon, land_sub)
         return cost + lam_env * risk + lam_land * p_land
 
     batched = jax.jit(jax.vmap(one, in_axes=(0, None, None, None, None, None)))

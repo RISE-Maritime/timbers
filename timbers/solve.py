@@ -85,6 +85,7 @@ def solve_corridor(
     base_seed=0,
     topk=3,
     polish=False,
+    land_sub=None,
 ):
     """Batched best-of-``n_seeds`` over all ``deps``. Returns list of result dicts.
 
@@ -94,7 +95,9 @@ def solve_corridor(
     ``hs_max``/``tws_max``/``p_max`` are the hard feasibility limits used to
     select among seeds (default: unconstrained). ``p_max`` is a shaft-power
     ceiling in kW; a route needing more cannot hold its planned schedule. ``polish=True`` applies the local-refinement
-    (gradient lateral+speed polish) to each selected route.
+    (gradient lateral+speed polish) to each selected route. ``land_sub`` sets how
+    densely land is checked between track points (``None``: at most one raster
+    cell apart, see :func:`op.land_substeps`; 1: at the points only, as v0.1).
 
     Cold restarts start from ``op.init_thetas(..., init, spread)`` at step
     ``sigma0``: by default the great circle; ``init="spread"`` bends restarts
@@ -115,7 +118,7 @@ def solve_corridor(
     """
     chunk = chunk or auto_chunk(cor, popsize, ALIGN)
     dim = 2 * (K - 2) + NSP
-    fit, shared = op.build_fit(cor, grids, land, pen, K, NSP, L, ALIGN, wps, power_fn)
+    fit, shared = op.build_fit(cor, grids, land, pen, K, NSP, L, ALIGN, wps, power_fn, land_sub)
     hp = jc.hyperparams(dim, popsize)
     D = len(deps)
     seed_tracks = [None] * D if seed_tracks is None else list(seed_tracks)
@@ -173,6 +176,7 @@ def solve_corridor(
             power_fn_host,
             hs_max=hs_max,
             tws_max=tws_max,
+            land_sub=land_sub,
         )
         if polish
         else None
