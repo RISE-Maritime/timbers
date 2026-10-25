@@ -286,13 +286,95 @@ def decode_route(theta, cor, K, L, n_speed=0):
     return lat, wlon, seg_dt
 
 
-def gc_init_theta(cor, K, n_speed=0):
-    """Interior control points along the straight chord + flat speed profile."""
+INITS = ("gc", "chord", "spread")
+
+
+def chord_init_theta(cor, K, n_speed=0):
+    """Interior control points on the straight chord between the ports in the
+    normalized lat/lon frame + flat speed profile (the v0.1 initial guess)."""
     o_n = np.array(cor.norm(cor.o_lat, cor.o_wlon))
     d_n = np.array(cor.norm(cor.d_lat, cor.d_wlon))
     fr = np.linspace(0, 1, K)[1:-1]
     interior = o_n[None, :] + fr[:, None] * (d_n - o_n)[None, :]
     return np.concatenate([interior.ravel(), np.zeros(n_speed)])
+
+
+def _great_circle(cor, n=256):
+    """``n`` points ``(lat, wlon)`` evenly spaced along the great circle between
+    the ports, in the corridor's working-longitude frame."""
+
+    def unit(lat, lon):
+        la, lo = np.radians(lat), np.radians(lon)
+        return np.array([np.cos(la) * np.cos(lo), np.cos(la) * np.sin(lo), np.sin(la)])
+
+    a, b = unit(cor.o_lat, cor.o_wlon), unit(cor.d_lat, cor.d_wlon)
+    omega = np.arccos(np.clip(a @ b, -1.0, 1.0))
+    f = np.linspace(0.0, 1.0, n)[:, None]
+    if omega < 1e-9:
+        p = np.repeat(a[None, :], n, axis=0)
+    else:
+        p = (np.sin((1 - f) * omega) * a + np.sin(f * omega) * b) / np.sin(omega)
+    lat = np.degrees(np.arcsin(np.clip(p[:, 2], -1.0, 1.0)))
+    lon = np.degrees(np.arctan2(p[:, 1], p[:, 0]))
+    dlon = ((np.diff(lon) + 180.0) % 360.0) - 180.0
+    return lat, cor.o_wlon + np.concatenate([[0.0], np.cumsum(dlon)])
+
+
+def _lateral_unit(cor):
+    """Unit normal to the chord in the normalized frame, pointing north (east
+    for a due north-south chord): the direction of a positive offset."""
+    o_n = np.array(cor.norm(cor.o_lat, cor.o_wlon))
+    d_n = np.array(cor.norm(cor.d_lat, cor.d_wlon))
+    d = d_n - o_n
+    nrm = np.array([d[1], -d[0]]) / max(np.linalg.norm(d), 1e-12)
+    if nrm[0] < 0 or (nrm[0] == 0 and nrm[1] < 0):
+        nrm = -nrm
+    return nrm
+
+
+def gc_init_theta(cor, K, n_speed=0, offset=0.0):
+    """Interior control points of the Bezier closest to the great circle between
+    the ports + flat speed profile.
+
+    ``offset`` bends the route sideways by a sine bump that is zero at the ports
+    and peaks mid-route at ``offset`` in the normalized frame (units of
+    ``cor.scale``), positive to the north of the chord. The curve is a
+    least-squares fit, as in :func:`fit_theta_to_track`. Until v0.1 this
+    function returned the straight chord, now :func:`chord_init_theta`.
+    """
+    lat, wlon = _great_circle(cor)
+    pts = np.stack(cor.norm(lat, wlon), axis=1)
+    if offset:
+        bump = np.sin(np.pi * np.linspace(0.0, 1.0, len(lat)))
+        pts = pts + offset * bump[:, None] * _lateral_unit(cor)[None, :]
+    interior, _ = _fit_interior(cor, pts, K)
+    return np.concatenate([interior.ravel(), np.zeros(n_speed)])
+
+
+def spread_offsets(n, spread):
+    """Lateral offsets of ``n`` restarts: ``0, +s/m, -s/m, +2s/m, -2s/m, ...``,
+    the largest equal to ``spread``. The first restart is the great circle."""
+    m = max(1, math.ceil((n - 1) / 2))
+    k = np.arange(1, n)
+    return np.concatenate([[0.0], spread * np.ceil(k / 2) / m * np.where(k % 2, 1.0, -1.0)])
+
+
+def init_thetas(cor, K, n_speed, n, init="gc", spread=0.15):
+    """``(n, dim)`` starting points of ``n`` restarts.
+
+    ``init="gc"`` starts every restart on the great circle; ``"chord"`` on the
+    straight chord in the normalized frame (the v0.1 behaviour); ``"spread"``
+    starts restart ``i`` on the great circle bent north or south by
+    ``spread_offsets(n, spread)[i]`` (units of ``cor.scale``), so restarts begin
+    in different basins instead of differing only in their random stream.
+    """
+    if init == "chord":
+        return np.tile(chord_init_theta(cor, K, n_speed), (n, 1))
+    if init == "gc":
+        return np.tile(gc_init_theta(cor, K, n_speed), (n, 1))
+    if init == "spread":
+        return np.stack([gc_init_theta(cor, K, n_speed, o) for o in spread_offsets(n, spread)])
+    raise ValueError(f"init must be one of {INITS}, got {init!r}")
 
 
 def _bernstein(r, K):
@@ -301,6 +383,20 @@ def _bernstein(r, K):
     binom = np.array([math.comb(K - 1, k) for k in i], float)
     r = np.asarray(r, float)[:, None]
     return binom * r**i * (1.0 - r) ** (K - 1 - i)
+
+
+def _fit_interior(cor, pts, K):
+    """Least-squares interior control points ``(K-2, 2)`` of the Bezier pinned to
+    the ports, through normalized points ``pts`` (N, 2) on a chord-length
+    parameterisation. Returns ``(interior, r)``, ``r`` the parameter of each point."""
+    s = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(pts, axis=0), axis=1))])
+    r = s / s[-1]
+    o_n = np.array(cor.norm(cor.o_lat, cor.o_wlon))
+    d_n = np.array(cor.norm(cor.d_lat, cor.d_wlon))
+    B = _bernstein(r, K)
+    ends = np.outer(B[:, 0], o_n) + np.outer(B[:, -1], d_n)
+    interior, *_ = np.linalg.lstsq(B[:, 1:-1], pts - ends, rcond=None)
+    return interior, r
 
 
 def fit_theta_to_track(cor, t_h, lat, lon, *, K, L, n_speed=0):
@@ -331,15 +427,11 @@ def fit_theta_to_track(cor, t_h, lat, lon, *, K, L, n_speed=0):
     wlon += 360.0 * np.round((cor.o_wlon - wlon[0]) / 360.0)
 
     pts = np.stack(cor.norm(lat, wlon), axis=1)
-    s = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(pts, axis=0), axis=1))])
-    r = s / s[-1]
-
+    interior, r = _fit_interior(cor, pts, K)
     o_n = np.array(cor.norm(cor.o_lat, cor.o_wlon))
     d_n = np.array(cor.norm(cor.d_lat, cor.d_wlon))
     B = _bernstein(r, K)
     ends = np.outer(B[:, 0], o_n) + np.outer(B[:, -1], d_n)
-    interior, *_ = np.linalg.lstsq(B[:, 1:-1], pts - ends, rcond=None)
-
     f_lat, f_wlon = cor.denorm(*(B[:, 1:-1] @ interior + ends).T)
     resid_nm = 60.0 * np.hypot(f_lat - lat, (f_wlon - wlon) * np.cos(np.radians(lat)))
 

@@ -6,7 +6,7 @@ One chunked, vmapped GPU dispatch over (departures x seeds). The batch is CHUNKE
 raises the per-instance working set and OOMs the GPU above some batch size.
 
 Returns, per departure, a result dict compatible with scoring / track writing:
-  {lat, wlon, seg_dt, theta, energy_mwh, max_hs_m, max_wind_mps}.
+  {lat, wlon, seg_dt, theta, energy_mwh, max_hs_m, max_wind_mps, ..., restarts}.
 """
 
 from __future__ import annotations
@@ -77,6 +77,10 @@ def solve_corridor(
     tws_max=float("inf"),
     p_max=float("inf"),
     sigma0=0.1,
+    init="gc",
+    spread=0.15,
+    seed_tracks=None,
+    sigma_warm=0.02,
     chunk=None,
     base_seed=0,
     topk=3,
@@ -91,15 +95,49 @@ def solve_corridor(
     select among seeds (default: unconstrained). ``p_max`` is a shaft-power
     ceiling in kW; a route needing more cannot hold its planned schedule. ``polish=True`` applies the local-refinement
     (gradient lateral+speed polish) to each selected route.
+
+    Cold restarts start from ``op.init_thetas(..., init, spread)`` at step
+    ``sigma0``: by default the great circle; ``init="spread"`` bends restarts
+    north and south of it, and ``init="chord"`` reproduces v0.1.
+
+    ``seed_tracks`` warm-starts the search from known routes: one entry per
+    departure, each ``None`` or a list of tracks ``(t_h, lat, lon)`` (hours after
+    departure, signed longitude) running port to port over ``cor.hours``. Each
+    track is fitted with :func:`op.fit_theta_to_track` and takes one of the
+    ``n_seeds`` restarts, run at the smaller step ``sigma_warm`` so that it
+    refines the seed's basin rather than leaving it; the remaining restarts start
+    cold. The fitted seeds are also scored themselves, so a seeded result is
+    never worse than its seed.
+
+    Each result carries ``restarts``: per restart, its final penalized cost
+    ``j``, ``seeded`` and decoded ``lat``/``wlon``, to show whether the restarts
+    agree on a basin.
     """
     chunk = chunk or auto_chunk(cor, popsize, ALIGN)
     dim = 2 * (K - 2) + NSP
     fit, shared = op.build_fit(cor, grids, land, pen, K, NSP, L, ALIGN, wps, power_fn)
-    x0 = jnp.asarray(op.gc_init_theta(cor, K, NSP), jnp.float32)
     hp = jc.hyperparams(dim, popsize)
-    solve = jc.make_solver(fit, x0, sigma0, hp, popsize, maxiter)
-
     D = len(deps)
+    seed_tracks = [None] * D if seed_tracks is None else list(seed_tracks)
+    if len(seed_tracks) != D:
+        raise ValueError(f"seed_tracks needs one entry per departure ({D}), got {len(seed_tracks)}")
+    seeds = [
+        [op.fit_theta_to_track(cor, *tr, K=K, L=L, n_speed=NSP)[0] for tr in (st or [])]
+        for st in seed_tracks
+    ]
+    if max(map(len, seeds), default=0) > n_seeds:
+        raise ValueError(f"more seed tracks than restarts (n_seeds={n_seeds}) for a departure")
+    x0s = np.empty((D, n_seeds, dim), np.float32)
+    sig = np.full((D, n_seeds), sigma0, np.float32)
+    seeded = np.zeros((D, n_seeds), bool)
+    for d, sd in enumerate(seeds):
+        n_s = len(sd)
+        if n_s:
+            x0s[d, :n_s], sig[d, :n_s], seeded[d, :n_s] = sd, sigma_warm, True
+        x0s[d, n_s:] = op.init_thetas(cor, K, NSP, n_seeds - n_s, init, spread)
+    solve = jc.make_solver(fit, x0s[0, 0], sigma0, hp, popsize, maxiter)
+    x0s, sig = x0s.reshape(-1, dim), sig.reshape(-1)
+
     # Offsets on the device grids' own clock: grids cut to a window (from_era5
     # with start) do not start at the host grid's t0.
     dep_offs = np.array([grids.hours_after_t0(dp) for dp in deps], np.float32)
@@ -111,7 +149,7 @@ def solve_corridor(
     best_f = np.empty(B, np.float32)
     for lo in range(0, B, chunk):  # chunk to stay in GPU mem
         hi = min(lo + chunk, B)
-        bx, bf = solve(keys[lo:hi], jnp.asarray(dep_offs_B[lo:hi]), shared)
+        bx, bf = solve(keys[lo:hi], jnp.asarray(dep_offs_B[lo:hi]), shared, x0s[lo:hi], sig[lo:hi])
         best_x[lo:hi] = np.asarray(bx)
         best_f[lo:hi] = np.asarray(bf)
     best_x = best_x.reshape(D, n_seeds, dim)
@@ -143,7 +181,8 @@ def solve_corridor(
     for d, dep in enumerate(deps):
         order = np.argsort(best_f[d])[:topk]
         cands = [
-            _exact(best_x[d, s], dep, cor, wind, wave, K, L, NSP, wps, power_fn_host) for s in order
+            _exact(x, dep, cor, wind, wave, K, L, NSP, wps, power_fn_host)
+            for x in [best_x[d, s] for s in order] + seeds[d]
         ]
         feas = [
             c
@@ -167,5 +206,10 @@ def solve_corridor(
                 wind,
                 wave,
             )
+        best["restarts"] = [
+            dict(j=float(best_f[d, s]), seeded=bool(seeded[d, s]))
+            | dict(zip(("lat", "wlon"), op.decode_route(best_x[d, s], cor, K, L, NSP)[:2]))
+            for s in range(n_seeds)
+        ]
         out.append(best)
     return out

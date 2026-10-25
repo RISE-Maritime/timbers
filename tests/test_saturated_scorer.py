@@ -53,7 +53,9 @@ def _grids(swh=1.5):
 
 
 def _route():
-    lat, wlon, seg = op.decode_route(op.gc_init_theta(COR, K, NSP), COR, K, L, NSP)
+    # The chord: its legs have near-equal commanded speeds, so a step that straddles
+    # a leg boundary sails at the right speed and the schedule check is exact.
+    lat, wlon, seg = op.decode_route(op.chord_init_theta(COR, K, NSP), COR, K, L, NSP)
     return (
         np.asarray(lat, float),
         np.asarray(op.working_to_signed(wlon), float),
