@@ -247,7 +247,9 @@ def test_voyage_across_180_takes_the_short_way():
         **SMALL,
     )
     assert out["arrived"]
-    assert out["actual_hours"] == pytest.approx(48.0, abs=1e-3)
+    # Not exact: a scorer step that straddles two legs of different commanded
+    # speed sails it at one of them, a few seconds over a curved plan.
+    assert out["actual_hours"] == pytest.approx(48.0, abs=5e-3)
     trk_lat, trk_lon = out["track"]["lat"], out["track"]["lon"]
     sailed = sum(
         _nm(trk_lat[i], trk_lon[i], trk_lat[i + 1], trk_lon[i + 1]) for i in range(len(trk_lat) - 1)

@@ -399,7 +399,8 @@ def test_ceiling_costs_and_cost_terms_match_main():
     term is zero."""
     g = Grids(*_members([1.0, 4.0, 6.8]), STEPS)
     rng = np.random.default_rng(3)
-    theta = np.tile(op.gc_init_theta(COR, K, NSP), (4, 1)).astype(np.float32)
+    # The v0.1 start the reference values were computed on (gc_init_theta then).
+    theta = np.tile(op.chord_init_theta(COR, K, NSP), (4, 1)).astype(np.float32)
     theta[:, -NSP:] = rng.normal(0.0, 0.08, (4, NSP))
     main = {
         ("deterministic", False): [7374.592285, 7289.885254, 7440.042480, 7242.279297],
