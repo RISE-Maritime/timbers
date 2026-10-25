@@ -6,4 +6,4 @@ CMA-ES, followed by a gradient local-refinement polish. An extension of
 the BERS reference method (arXiv 2605.31533).
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
