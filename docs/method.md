@@ -22,9 +22,7 @@ profile (`n_speed` log-weights → per-segment durations summing to the fixed
 passage time, `timbers.optimizer.time_alloc`) is co-optimized *jointly with
 geometry* in stage 1. The parameterization is a strict superset of BERS:
 zero log-weights reproduce the implicit uniform-speed model exactly. This is
-the **dominant energy lever** once the geometry is resolved: a
-dynamic-programming study independently shows speed allocation is first-order
-while global geometry is not. Which resolution axis dominates depends on the
+the **dominant energy lever** once the geometry is resolved. Which resolution axis dominates depends on the
 passage and on the starting grid. On a multi-day passage started from a coarse
 curve, refining the geometry comes first and speed second (F below). It also
 makes BERS's stage-2 FMS redundant.
@@ -56,22 +54,16 @@ report the restart spread with the result.
 
 Cold restarts start on the great circle (`init="gc"`, the default since v0.2),
 on the v0.1 straight chord in the normalized frame (`init="chord"`), or on the
-great circle bent alternately north and south (`init="spread"`). On a 2024
-study of 92 North Atlantic hindsight cases (both directions, with and without
-sails, `K = 20`, `L = 100`, `n_speed = 64`, 8 restarts of 300 iterations) the
-three agree: total energy within 0.3%, the per-case median difference 0.0%, and
-the restarts of a case agree with each other (median 1.004 times the best).
-Against an exact graph optimum of the same problem the cold starts are within
-3% in the median but more than 5% worse in about 40% of cases; a different cold
-start does not close that gap, a warm start does. `solve_corridor(seed_tracks=...)`
+great circle bent alternately north and south (`init="spread"`). All cold
+starts can settle in the same wrong basin, and a different cold start does not
+leave it; a warm start does. `solve_corridor(seed_tracks=...)`
 fits each given route with `optimizer.fit_theta_to_track` and runs it as one of
 the restarts at the small step `sigma_warm` (default 0.02, against `sigma0 =
 0.1` cold), so the search refines the seed's basin instead of leaving it; the
-fitted seed is also scored as a candidate. On seven flagged cases one restart
-seeded from the graph optimum, beside seven cold ones, cut the energy by 13 to
-58% against the best cold start, ending within 6% of the graph optimum and
-below it in four (the optimum is on a lattice, the seeded route continuous). At
-the cold step the same seed drifts back to the cold-start result. Each result reports every restart's cost and route (`restarts`).
+fitted seed is also scored as a candidate. Seeded from a good route, for
+example the optimum of a graph search on the same problem, one restart at the
+small step stays in that route's basin and refines it; at the cold step the same
+seed drifts back to the cold-start result. Each result reports every restart's cost and route (`restarts`).
 
 **E. Gradient local-refinement polish (supersedes FMS).** Per-waypoint lateral
 offset along the route normal + co-refined speed, gentle Adam, curvature
@@ -191,15 +183,13 @@ serve a surrogate and a real forecast ensemble:
   `hs_soft` is degenerate (trading a lower violation probability for some
   energy). The other safety modes (breach probability, CVaR) apply unchanged.
 
-**Validity limit of the surrogate, measured.** The shift/scale surrogate was
-compared against real ECMWF ENS (51 members, along-route Hs, two North Atlantic
-storm departures) in the ensemble-routing study built on TiMBERS. It
-approximately matches real ensemble spread out to about two days of lead time
-(spread ratio 0.75–0.97 at 12–72 h) and understates it beyond: 1.45–1.89× at
-72–144 h, 2.4–6.2× at 144–366 h. The mismatch is structural: real forecast
-spread grows with lead time while the surrogate's tracks the amplitude of the
-field being perturbed, and real members are right-skewed (skew 0.4–1.4), which
-a symmetric shift/scale cannot produce. The surrogate is therefore a mechanism
+**Validity limit of the surrogate.** Against real ECMWF ENS members (along-route
+Hs on North Atlantic storm departures), the shift/scale surrogate approximately
+matches the ensemble spread out to about two days of lead time and understates
+it beyond, by more the longer the lead time. The mismatch is structural: real
+forecast spread grows with lead time while the surrogate's tracks the amplitude
+of the field being perturbed, and real members are right-skewed, which a
+symmetric shift/scale cannot produce. The surrogate is therefore a mechanism
 demonstration and a short-horizon (≲2 day) tool. For multi-day passages, score
 against real ensemble members: thread a member axis through the cost instead of
 perturbing one field.
